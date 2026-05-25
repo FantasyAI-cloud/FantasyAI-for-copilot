@@ -1,0 +1,135 @@
+{
+  "name": "personal-openai-chat",
+  "displayName": "Personal OpenAI Chat",
+  "description": "Connect VS Code to any OpenAI-compatible endpoint (Ollama, Deepseek, OpenRouter, Azure OpenAI, etc.) as a native Copilot Chat model.",
+  "version": "1.0.0",
+  "publisher": "yourname",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourname/personal-openai-chat.git"
+  },
+  "keywords": ["openai", "ollama", "deepseek", "copilot", "ai", "chat"],
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["AI", "Chat", "Other"],
+  "icon": "icon.png",
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:personalOpenAI.openChat",
+    "onCommand:personalOpenAI.configureProvider",
+    "onCommand:personalOpenAI.pickModel",
+    "onCommand:personalOpenAI.testConnection",
+    "onCommand:personalOpenAI.clearApiKey"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "personalOpenAI.openChat",          "title": "Personal OpenAI: Open Chat" },
+      { "command": "personalOpenAI.configureProvider", "title": "Personal OpenAI: Configure Provider" },
+      { "command": "personalOpenAI.pickModel",         "title": "Personal OpenAI: Pick Model" },
+      { "command": "personalOpenAI.testConnection",    "title": "Personal OpenAI: Test Connection" },
+      { "command": "personalOpenAI.clearApiKey",       "title": "Personal OpenAI: Clear Saved API Key" }
+    ],
+    "configuration": {
+      "title": "Personal OpenAI",
+      "properties": {
+        "personalOpenAI.providers": {
+          "type": "array",
+          "default": [],
+          "description": "List of OpenAI-compatible providers.",
+          "items": {
+            "type": "object",
+            "required": ["name", "endpoint", "models"],
+            "properties": {
+              "name":          { "type": "string" },
+              "endpoint":      { "type": "string" },
+              "models":        { "type": "array", "items": { "type": "string" } },
+              "defaultModel":  { "type": "string" },
+              "toolCalling":   { "type": "boolean", "default": true, "description": "Default tool-calling capability used as fallback when a model has no entry in modelCapabilities." },
+              "imageInput":    { "type": "boolean", "default": false },
+              "contextWindow": { "type": "number",  "default": 128000 },
+              "modelCapabilities": {
+                "type": "object",
+                "default": {},
+                "description": "Per-model capability overrides keyed by model id. Auto-populated by capability detection.",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "toolCalling": { "type": "boolean" },
+                    "imageInput":  { "type": "boolean" },
+                    "source":      { "type": "string", "enum": ["openrouter", "ollama", "probe", "runtime", "manual"] }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "personalOpenAI.activeProvider": {
+          "type": "string",
+          "default": "",
+          "description": "Currently active provider name."
+        },
+        "personalOpenAI.activeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Currently active model ID."
+        },
+        "personalOpenAI.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 2
+        },
+        "personalOpenAI.maxTokens": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 1
+        },
+        "personalOpenAI.systemPrompt": {
+          "type": "string",
+          "default": "You are a helpful coding assistant inside VS Code."
+        },
+        "personalOpenAI.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000
+        },
+        "personalOpenAI.detection.timeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "description": "Per-model probe timeout (ms) during capability detection."
+        },
+        "personalOpenAI.detection.concurrency": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Parallel probes during detection. 0 = auto (1 for localhost/Ollama/vLLM, 6 for OpenRouter, 4 otherwise)."
+        }
+      }
+    },
+    "languageModelChatProviders": [
+      {
+        "vendor": "personal-openai",
+        "displayName": "Personal OpenAI"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "personalOpenAI.openChat" },
+        { "command": "personalOpenAI.configureProvider" },
+        { "command": "personalOpenAI.pickModel" },
+        { "command": "personalOpenAI.testConnection" },
+        { "command": "personalOpenAI.clearApiKey" }
+      ]
+    }
+  },
+  "scripts": {
+    "lint": "node --check extension.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  }
+}
