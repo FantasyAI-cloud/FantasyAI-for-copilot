@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Personal OpenAI Chat — VS Code Extension
 
 Connect VS Code to **any OpenAI-compatible endpoint** and use it as a native language model in Copilot Chat — no cloud lock-in.
@@ -127,3 +128,7 @@ Settings are stored under `personalOpenAI.*` in VS Code settings.
 ## License
 
 MIT
+=======
+# FantasyAI-for-copilot
+Pick Every FantasyAI Provider from the Copilot Chat model picker — and keep everything else Copilot already gives you.
+>>>>>>> 9778e18 (initial commit)
