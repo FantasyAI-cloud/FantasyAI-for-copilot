@@ -1,16 +1,23 @@
-// extension.js — Personal OpenAI Chat for VS Code
+// extension.js — FantasyAI for Copilot
 const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+// ─── Constants ─────────────────────────────────────────────────────────────
+
+const FANTASYAI_ENDPOINT = "https://fantasyai.cloud/api/v1";
+const FANTASYAI_VENDOR = "fantasyai";
+const SECRET_KEY = "fantasyAI.apiKey";
+const CACHE_KEY = "fantasyAI.modelCache";
+
 // ─── Debug logger ──────────────────────────────────────────────────────────
 
 let debugLogPath = null;
 function debug(...args) {
-  const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+  const ts = new Date().toISOString().slice(11, 23);
   const msg = args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
-  console.log(`[PAI ${ts}] ${msg}`);
+  console.log(`[FAI ${ts}] ${msg}`);
   if (debugLogPath) {
     try { fs.appendFileSync(debugLogPath, `[${ts}] ${msg}\n`); } catch {}
   }
@@ -19,7 +26,7 @@ function debug(...args) {
 function initDebugLog(_context) {
   if (debugLogPath) return;
   const candidates = [
-    path.join(os.tmpdir(), "personal-openai-debug.log"),
+    path.join(os.tmpdir(), "fantasyai-debug.log"),
     path.join(__dirname, "debug.log"),
   ];
   try {
@@ -35,23 +42,44 @@ function initDebugLog(_context) {
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function cfg() {
-  return vscode.workspace.getConfiguration("personalOpenAI");
+  return vscode.workspace.getConfiguration("fantasyAI");
 }
 
-function getProviders() {
-  return cfg().get("providers") || [];
+async function getApiKey(context) {
+  return context.secrets.get(SECRET_KEY);
 }
 
-async function getApiKey(context, providerName) {
-  return context.secrets.get(`personalOpenAI.apiKey.${providerName}`);
+async function setApiKeySecret(context, key) {
+  await context.secrets.store(SECRET_KEY, key);
 }
 
-async function setApiKey(context, providerName, key) {
-  await context.secrets.store(`personalOpenAI.apiKey.${providerName}`, key);
+async function deleteApiKeySecret(context) {
+  await context.secrets.delete(SECRET_KEY);
 }
 
-async function deleteApiKey(context, providerName) {
-  await context.secrets.delete(`personalOpenAI.apiKey.${providerName}`);
+// ─── Model cache (auto-refreshed) ──────────────────────────────────────────
+
+/** @type {{ models: string[], capabilities: Record<string, {toolCalling?: boolean, imageInput?: boolean, source?: string}>, fetchedAt: number }} */
+let modelCache = { models: [], capabilities: {}, fetchedAt: 0 };
+
+let refreshTimer = null;
+/** @type {vscode.EventEmitter<void> | null} */
+let modelChangeEmitter = null;
+
+function loadCacheFromStorage(context) {
+  const cached = context.globalState.get(CACHE_KEY);
+  if (cached && Array.isArray(cached.models)) {
+    modelCache = {
+      models: cached.models,
+      capabilities: cached.capabilities || {},
+      fetchedAt: cached.fetchedAt || 0,
+    };
+    debug(`[cache] loaded ${modelCache.models.length} model(s) from storage`);
+  }
+}
+
+async function saveCacheToStorage(context) {
+  await context.globalState.update(CACHE_KEY, modelCache);
 }
 
 // ─── OpenAI API call (streaming) ───────────────────────────────────────────
@@ -115,7 +143,6 @@ async function* callOpenAI(endpoint, apiKey, model, messages, signal) {
 async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, extraBody = {}) {
   const t0 = Date.now();
   const config = cfg();
-  // Hard cap: never send more than 32768 max_tokens to prevent runaway generation
   const maxTokens = Math.min(config.get("maxTokens") ?? 8192, 32768);
   const body = {
     model,
@@ -126,8 +153,6 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
     ...extraBody,
   };
 
-  // If tools are present, request a tool_choice that prevents the model
-  // from generating endless reasoning before calling tools
   if (body.tools?.length && !body.tool_choice) {
     body.tool_choice = "auto";
   }
@@ -158,11 +183,10 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
   const decoder = new TextDecoder();
   let buf = "";
 
-  // Accumulate tool calls across streaming deltas
-  const toolCallsAcc = {}; // index -> { id, name, arguments }
+  const toolCallsAcc = {};
   let chunkCount = 0;
   let lastChunkTime = Date.now();
-  const STREAM_TIMEOUT_MS = 120_000; // 2 min max between chunks
+  const STREAM_TIMEOUT_MS = 120_000;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -186,18 +210,15 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
         const choice = json.choices?.[0];
         if (!choice) continue;
 
-        // Text delta (content OR reasoning_content)
         const deltaText = choice.delta?.content;
         const reasoningText = choice.delta?.reasoning_content;
         if (deltaText) {
           yield { type: "text", text: deltaText };
         }
         if (reasoningText) {
-          // DeepSeek: yield reasoning separately for caching later
           yield { type: "reasoning", text: reasoningText };
         }
 
-        // Tool call deltas (OpenAI format: array of tool_call deltas)
         const toolDeltas = choice.delta?.tool_calls;
         if (toolDeltas) {
           for (const tc of toolDeltas) {
@@ -211,14 +232,12 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
           }
         }
 
-        // finish_reason "tool_calls" → emit accumulated tool calls
         if (choice.finish_reason === "tool_calls") {
           const calls = Object.values(toolCallsAcc).filter((c) => c.id && c.name);
           if (calls.length > 0) {
             const callNames = calls.map(c => `${c.name}(${(c.arguments || "").slice(0, 80)})`).join(",");
             debug(`🔧 tool_calls: ${callNames} (${chunkCount} chunks, ${Date.now() - t0}ms total)`);
             yield { type: "tool_calls", calls };
-            // Reset accumulator to prevent duplicate emission in fallback
             for (const key of Object.keys(toolCallsAcc)) delete toolCallsAcc[key];
           }
         }
@@ -233,18 +252,16 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
 
   debug(`✓ stream done: ${chunkCount} chunks, ${Date.now() - t0}ms total`);
 
-  // Fallback: if stream ended without explicit finish_reason, emit any accumulated tool calls
   const pending = Object.values(toolCallsAcc).filter((c) => c.id && c.name);
   if (pending.length > 0) {
     yield { type: "tool_calls", calls: pending };
   }
 }
 
-// Non-streaming version for simple requests (e.g. model list)
-async function callOpenAISimple(endpoint, apiKey, path, options = {}) {
+async function callOpenAISimple(endpoint, apiKey, p, options = {}) {
   const headers = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  const url = endpoint.replace(/\/$/, "") + path;
+  const url = endpoint.replace(/\/$/, "") + p;
   const res = await fetch(url, { headers, ...options });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -254,45 +271,19 @@ async function callOpenAISimple(endpoint, apiKey, path, options = {}) {
 
 const TOOL_ERR_RE = /(does\s*not\s*support\s*(tool|function)|tool[_\s]?(call|use)\s*not\s*supported|no\s*tool\s*support|function[_\s]?calling\s*not\s*supported)/i;
 
-function isOpenRouterEndpoint(ep) {
-  return /openrouter\.ai/i.test(ep);
-}
-function isOllamaEndpoint(ep) {
-  return /:11434(\/|$)|\/ollama(\/|$)/i.test(ep);
-}
-
 function getDetectionTimeout(override) {
   if (override && override > 0) return override;
   return cfg().get("detection.timeoutMs") || 30000;
 }
-function getDetectionConcurrency(endpoint, override) {
+function getDetectionConcurrency(override) {
   if (override && override > 0) return override;
   const configured = cfg().get("detection.concurrency") || 0;
   if (configured > 0) return configured;
-  // Gateways (mammon-ai, OpenRouter, etc.) handle parallel requests well even on localhost
-  if (isOpenRouterEndpoint(endpoint)) return 8;
   return 6;
 }
 
-// Parse OpenRouter /models response: each entry has supported_parameters[] and architecture
-function parseOpenRouterCaps(data) {
-  const out = {};
-  for (const m of (data?.data || [])) {
-    if (!m?.id) continue;
-    const sp = Array.isArray(m.supported_parameters) ? m.supported_parameters : [];
-    const inputModalities = m.architecture?.input_modalities || [];
-    out[m.id] = {
-      toolCalling: sp.includes("tools") || sp.includes("tool_choice"),
-      imageInput: inputModalities.includes("image"),
-      source: "openrouter",
-    };
-  }
-  return out;
-}
-
-// Generic /v1/models capability parser — any gateway that returns a `capabilities`
-// array per model (mammon-ai, OpenWebUI, etc.) gets treated as authoritative.
-// Returns { [id]: caps } only for entries that actually carry a capabilities field.
+// Generic /v1/models capability parser — gateways that return a `capabilities`
+// array per model (FantasyAI, OpenWebUI, etc.) get treated as authoritative.
 function parseGatewayCaps(data) {
   const out = {};
   for (const m of (data?.data || data?.models || [])) {
@@ -309,40 +300,8 @@ function parseGatewayCaps(data) {
   return out;
 }
 
-// Ollama: POST /api/show → { capabilities: ["tools", "vision", ...] }
-async function detectOllamaCaps(endpoint, modelId, signal, timeoutMs = 10000) {
-  // Strip trailing /v1 for native ollama API
-  const base = endpoint.replace(/\/v1\/?$/, "").replace(/\/$/, "");
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
-  try {
-    const res = await fetch(base + "/api/show", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: modelId }),
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const j = await res.json();
-    const caps = Array.isArray(j.capabilities) ? j.capabilities : [];
-    if (!caps.length) return null;
-    return {
-      toolCalling: caps.includes("tools"),
-      imageInput: caps.includes("vision"),
-      source: "ollama",
-    };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 // Probe: send a 1-token request with a dummy tool. If the server rejects with
 // a "no tool support" 400, the model doesn't support tools. Otherwise assume yes.
-// Returns { toolCalling, imageInput, source } | { source: "timeout" } | null
 async function probeToolSupport(endpoint, apiKey, modelId, signal, timeoutMs = 30000) {
   const body = {
     model: modelId,
@@ -375,7 +334,7 @@ async function probeToolSupport(endpoint, apiKey, modelId, signal, timeoutMs = 3
       return { toolCalling: true, imageInput: false, source: "probe" };
     }
     if (res.ok) return { toolCalling: true, imageInput: false, source: "probe" };
-    return null; // 401/403/5xx → unknown
+    return null;
   } catch {
     if (timedOut) return { source: "timeout" };
     return null;
@@ -384,7 +343,6 @@ async function probeToolSupport(endpoint, apiKey, modelId, signal, timeoutMs = 3
   }
 }
 
-// Limit concurrency for probes
 async function mapWithConcurrency(items, concurrency, mapper) {
   const out = new Array(items.length);
   let idx = 0;
@@ -399,10 +357,6 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return out;
 }
 
-// Detect capabilities for a list of models against an endpoint.
-// Returns: { [modelId]: { toolCalling, imageInput, source } }
-// Models that timed out get { source: "timeout" } so the UI can show a retry badge.
-// onProgress(done, total, currentModel) is called for each model resolved.
 async function detectCapabilities(endpoint, apiKey, models, onProgress, opts = {}) {
   const result = {};
   const total = models.length;
@@ -410,39 +364,25 @@ async function detectCapabilities(endpoint, apiKey, models, onProgress, opts = {
   const tick = (m) => { done++; try { onProgress?.(done, total, m); } catch {} };
 
   const timeoutMs = getDetectionTimeout(opts.timeoutMs);
-  const concurrency = getDetectionConcurrency(endpoint, opts.concurrency);
-  debug(`[caps] detect endpoint=${endpoint} models=${total} timeout=${timeoutMs}ms concurrency=${concurrency}`);
+  const concurrency = getDetectionConcurrency(opts.concurrency);
+  debug(`[caps] detect models=${total} timeout=${timeoutMs}ms concurrency=${concurrency}`);
 
-  // Step 1: bulk metadata (single /models fetch, used by OpenRouter and any gateway
-  // that exposes a `capabilities` array per model — mammon-ai, OpenWebUI, etc.)
-  // Caller can pass `bulkData` to avoid re-fetching.
+  // Step 1: try /models for gateway-exposed capabilities
   let bulkData = opts.bulkData;
   if (!bulkData) {
     try { bulkData = await callOpenAISimple(endpoint, apiKey, "/models"); } catch {}
   }
   if (bulkData) {
-    if (isOpenRouterEndpoint(endpoint)) {
-      Object.assign(result, parseOpenRouterCaps(bulkData));
-    }
-    // Generic capabilities field — always try, takes precedence over OpenRouter
-    // only if it actually contains a capabilities array (parseGatewayCaps skips otherwise)
     const gw = parseGatewayCaps(bulkData);
-    for (const [m, c] of Object.entries(gw)) {
-      result[m] = c; // gateway is authoritative when it provides metadata
-    }
+    Object.assign(result, gw);
     for (const m of models) if (result[m]) tick(m);
   }
 
   const remaining = models.filter((m) => !result[m]);
-  const ollama = isOllamaEndpoint(endpoint);
 
-  // Step 2: per-model detection (Ollama /api/show, then probe fallback)
+  // Step 2: per-model probe fallback
   await mapWithConcurrency(remaining, concurrency, async (m) => {
-    let caps = null;
-    // Ollama /api/show is fast (no inference) — try first to skip the expensive probe
-    if (ollama) caps = await detectOllamaCaps(endpoint, m, undefined, 10000);
-    if (!caps) caps = await probeToolSupport(endpoint, apiKey, m, undefined, timeoutMs);
-    // Always record an entry so UI knows we tried — even on probe failure
+    const caps = await probeToolSupport(endpoint, apiKey, m, undefined, timeoutMs);
     result[m] = caps || { source: "error" };
     tick(m);
   });
@@ -450,249 +390,173 @@ async function detectCapabilities(endpoint, apiKey, models, onProgress, opts = {
   return result;
 }
 
-// Merge fresh detection into the provider's modelCapabilities, preserving manual overrides.
-function mergeCapabilities(existing, detected) {
-  const out = { ...(existing || {}) };
-  for (const [m, caps] of Object.entries(detected)) {
-    const prev = out[m];
-    // Keep manual overrides
-    if (prev?.source === "manual") continue;
-    out[m] = caps;
-  }
-  return out;
-}
-
-// Persist a single-model capability change (used by runtime fallback)
-async function patchModelCapability(providerName, modelId, patch) {
-  const list = getProviders();
-  const idx = list.findIndex((p) => p.name === providerName);
-  if (idx < 0) return;
-  const p = list[idx];
-  const caps = { ...(p.modelCapabilities || {}) };
-  caps[modelId] = { ...(caps[modelId] || {}), ...patch };
-  list[idx] = { ...p, modelCapabilities: caps };
-  await cfg().update("providers", list, vscode.ConfigurationTarget.Global);
-  debug(`[caps] persisted ${providerName}/${modelId} → ${JSON.stringify(patch)}`);
-}
-
-// Resolve effective capabilities for a model, falling back to provider defaults.
-function resolveCaps(provider, modelId) {
-  const perModel = provider.modelCapabilities?.[modelId];
+function resolveCaps(modelId) {
+  const c = modelCache.capabilities[modelId];
   return {
-    toolCalling: perModel?.toolCalling ?? provider.toolCalling ?? true,
-    imageInput:  perModel?.imageInput  ?? provider.imageInput  ?? false,
-    source:      perModel?.source      ?? "default",
+    toolCalling: c?.toolCalling ?? true,
+    imageInput: c?.imageInput ?? false,
+    source: c?.source ?? "default",
   };
+}
+
+// ─── Model refresh ─────────────────────────────────────────────────────────
+
+async function fetchModelsAndCaps(context, { silent = true } = {}) {
+  const apiKey = await getApiKey(context);
+  if (!apiKey) {
+    debug("[refresh] no API key — skipping");
+    if (!silent) vscode.window.showWarningMessage("FantasyAI: set your API key first.");
+    return null;
+  }
+  try {
+    const data = await callOpenAISimple(FANTASYAI_ENDPOINT, apiKey, "/models");
+    const models = (data.data || data.models || [])
+      .map((m) => m.id || m)
+      .filter(Boolean);
+    if (!models.length) {
+      debug("[refresh] /models returned no entries");
+      return null;
+    }
+    const caps = await detectCapabilities(FANTASYAI_ENDPOINT, apiKey, models, null, { bulkData: data });
+    modelCache = { models, capabilities: caps, fetchedAt: Date.now() };
+    await saveCacheToStorage(context);
+    modelChangeEmitter?.fire();
+    debug(`[refresh] cached ${models.length} model(s)`);
+    return modelCache;
+  } catch (e) {
+    debug(`[refresh] failed: ${e.message}`);
+    if (!silent) vscode.window.showErrorMessage(`FantasyAI refresh failed: ${e.message}`);
+    return null;
+  }
+}
+
+function startAutoRefresh(context) {
+  if (refreshTimer) clearInterval(refreshTimer);
+  const intervalMs = Math.max(30000, cfg().get("modelRefreshIntervalMs") || 300000);
+  refreshTimer = setInterval(() => {
+    fetchModelsAndCaps(context).catch(() => {});
+  }, intervalMs);
+  debug(`[refresh] auto-refresh every ${intervalMs}ms`);
+}
+
+async function patchModelCapability(context, modelId, patch) {
+  const caps = { ...(modelCache.capabilities || {}) };
+  caps[modelId] = { ...(caps[modelId] || {}), ...patch };
+  modelCache = { ...modelCache, capabilities: caps };
+  await saveCacheToStorage(context);
+  debug(`[caps] persisted ${modelId} → ${JSON.stringify(patch)}`);
 }
 
 // ─── Commands ──────────────────────────────────────────────────────────────
 
-// Opens a persistent WebView form — no input box that disappears on focus loss
-async function cmdConfigureProvider(context) {
-  const panel = vscode.window.createWebviewPanel(
-    "personalOpenAIConfig",
-    "Configure Provider",
-    vscode.ViewColumn.One,
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
-
-  const providers = getProviders();
-  panel.webview.html = getConfigHtml(providers);
-
-  panel.webview.onDidReceiveMessage(async (msg) => {
-    // ── Fetch models from endpoint ──
-    if (msg.type === "fetchModels") {
-      const apiKey = msg.apiKey || (await getApiKey(context, msg.name)) || "";
-      try {
-        const data = await callOpenAISimple(msg.endpoint, apiKey, "/models");
-        const models = (data.data || data.models || [])
-          .map((m) => m.id || m)
-          .filter(Boolean);
-        panel.webview.postMessage({ type: "models", models });
-        // Auto-kick capability detection right after listing — reuse the response
-        // so gateways exposing `capabilities` (mammon-ai, OpenWebUI, OpenRouter)
-        // are read directly without a second roundtrip or any probe.
-        if (models.length) {
-          panel.webview.postMessage({ type: "capsProgress", done: 0, total: models.length });
-          try {
-            const caps = await detectCapabilities(msg.endpoint, apiKey, models, (done, total, m) => {
-              panel.webview.postMessage({ type: "capsProgress", done, total, current: m });
-            }, { bulkData: data });
-            panel.webview.postMessage({ type: "capsResult", capabilities: caps });
-          } catch (e) {
-            panel.webview.postMessage({ type: "capsError", message: e.message });
-          }
-        }
-      } catch (e) {
-        panel.webview.postMessage({ type: "fetchError", message: e.message });
-      }
-      return;
-    }
-
-    // ── Manual re-detect for the currently edited model list ──
-    if (msg.type === "detectCapabilities") {
-      const apiKey = msg.apiKey || (await getApiKey(context, msg.name)) || "";
-      try {
-        panel.webview.postMessage({ type: "capsProgress", done: 0, total: msg.models.length });
-        const opts = {};
-        if (msg.timeoutMs) opts.timeoutMs = msg.timeoutMs;
-        if (msg.concurrency) opts.concurrency = msg.concurrency;
-        const caps = await detectCapabilities(msg.endpoint, apiKey, msg.models, (done, total, m) => {
-          panel.webview.postMessage({ type: "capsProgress", done, total, current: m });
-        }, opts);
-        panel.webview.postMessage({ type: "capsResult", capabilities: caps });
-      } catch (e) {
-        panel.webview.postMessage({ type: "capsError", message: e.message });
-      }
-      return;
-    }
-
-    // ── Save provider ──
-    if (msg.type === "save") {
-      const { name, endpoint, apiKey, models, defaultModel,
-              toolCalling, imageInput, contextWindow, modelCapabilities, editingName } = msg;
-
-      if (apiKey.trim()) {
-        await setApiKey(context, name.trim(), apiKey.trim());
-      }
-
-      // Preserve existing per-model caps merged with any incoming caps from the webview
-      const currentProviders = getProviders();
-      const existing = editingName ? currentProviders.find((p) => p.name === editingName) : null;
-      const mergedCaps = { ...(existing?.modelCapabilities || {}), ...(modelCapabilities || {}) };
-      // Drop entries for models no longer in the list
-      const kept = {};
-      for (const m of models) if (mergedCaps[m]) kept[m] = mergedCaps[m];
-
-      const updated = {
-        name: name.trim(),
-        endpoint: endpoint.trim(),
-        models: models.filter(Boolean),
-        defaultModel: defaultModel || models[0] || "",
-        toolCalling,
-        imageInput,
-        contextWindow: Number(contextWindow) || 128000,
-        modelCapabilities: kept,
-      };
-
-      const list = editingName
-        ? currentProviders.map((p) => (p.name === editingName ? updated : p))
-        : [...currentProviders, updated];
-
-      await cfg().update("providers", list, vscode.ConfigurationTarget.Global);
-      panel.webview.postMessage({ type: "saved", provider: updated, editingName });
-      return;
-    }
-
-    // ── Delete provider ──
-    if (msg.type === "delete") {
-      await deleteApiKey(context, msg.name);
-      // Always re-read providers from config to avoid stale closure data
-      const currentProviders = getProviders();
-      const list = currentProviders.filter((p) => p.name !== msg.name);
-      await cfg().update("providers", list, vscode.ConfigurationTarget.Global);
-      panel.webview.postMessage({ type: "deleted", name: msg.name });
-      return;
-    }
+async function cmdSetApiKey(context) {
+  const current = await getApiKey(context);
+  const key = await vscode.window.showInputBox({
+    prompt: "Enter your FantasyAI API key",
+    placeHolder: "fa_…",
+    password: true,
+    value: current || "",
+    ignoreFocusOut: true,
   });
-}
-
-async function cmdPickModel(context) {
-  const providers = getProviders();
-  if (!providers.length) {
-    vscode.window.showWarningMessage(
-      "No providers configured. Run Personal OpenAI: Configure Provider first."
-    );
+  if (key === undefined) return;
+  const trimmed = key.trim();
+  if (!trimmed) {
+    await deleteApiKeySecret(context);
+    modelCache = { models: [], capabilities: {}, fetchedAt: 0 };
+    await saveCacheToStorage(context);
+    modelChangeEmitter?.fire();
+    vscode.window.showInformationMessage("FantasyAI API key cleared.");
     return;
   }
-
-  const items = providers.flatMap((p) =>
-    (p.models || []).map((m) => {
-      const caps = resolveCaps(p, m);
-      const badges = [];
-      if (caps.toolCalling) badges.push("🔧 tools");
-      if (caps.imageInput) badges.push("🖼 vision");
-      const detail = badges.length ? badges.join(" · ") : "text-only";
-      return {
-        label: m,
-        description: `${p.name}  ·  ${detail}`,
-        provider: p,
-        model: m,
-      };
-    })
-  );
-
-  const pick = await vscode.window.showQuickPick(items, {
-    placeHolder: "Select active model",
-  });
-  if (!pick) return;
-
-  await cfg().update(
-    "activeProvider",
-    pick.provider.name,
-    vscode.ConfigurationTarget.Global
-  );
-  await cfg().update(
-    "activeModel",
-    pick.model,
-    vscode.ConfigurationTarget.Global
-  );
-  vscode.window.showInformationMessage(
-    `Active model: ${pick.label} (${pick.provider.name})`
-  );
-}
-
-async function cmdTestConnection(context) {
-  const providers = getProviders();
-  if (!providers.length) {
-    vscode.window.showWarningMessage("No providers configured.");
-    return;
-  }
-
-  const pick = await vscode.window.showQuickPick(
-    providers.map((p) => ({ label: p.name, provider: p })),
-    { placeHolder: "Select provider to test" }
-  );
-  if (!pick) return;
-
-  const { provider } = pick;
-  const apiKey = await getApiKey(context, provider.name);
-
+  await setApiKeySecret(context, trimmed);
   await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: `Testing ${provider.name}…`,
-    },
-    async () => {
-      try {
-        await callOpenAISimple(provider.endpoint, apiKey, "/models");
-        vscode.window.showInformationMessage(
-          `✅ ${provider.name} is reachable.`
-        );
-      } catch (e) {
-        vscode.window.showErrorMessage(
-          `❌ ${provider.name} failed: ${e.message}`
-        );
-      }
-    }
+    { location: vscode.ProgressLocation.Notification, title: "FantasyAI: loading models…" },
+    () => fetchModelsAndCaps(context, { silent: false })
   );
+  if (modelCache.models.length) {
+    vscode.window.showInformationMessage(`✅ FantasyAI ready — ${modelCache.models.length} model(s) loaded.`);
+  } else {
+    vscode.window.showWarningMessage("API key saved, but no models were returned. Try Test Connection.");
+  }
 }
 
 async function cmdClearApiKey(context) {
-  const providers = getProviders();
-  if (!providers.length) {
-    vscode.window.showWarningMessage("No providers configured.");
+  await deleteApiKeySecret(context);
+  modelCache = { models: [], capabilities: {}, fetchedAt: 0 };
+  await saveCacheToStorage(context);
+  modelChangeEmitter?.fire();
+  vscode.window.showInformationMessage("FantasyAI API key cleared.");
+}
+
+async function cmdPickModel(context) {
+  if (!modelCache.models.length) {
+    const apiKey = await getApiKey(context);
+    if (!apiKey) {
+      const choice = await vscode.window.showWarningMessage(
+        "No FantasyAI API key set.",
+        "Set API Key"
+      );
+      if (choice === "Set API Key") vscode.commands.executeCommand("fantasyAI.setApiKey");
+      return;
+    }
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "FantasyAI: loading models…" },
+      () => fetchModelsAndCaps(context, { silent: false })
+    );
+  }
+  if (!modelCache.models.length) {
+    vscode.window.showWarningMessage("No FantasyAI models available.");
     return;
   }
 
-  const pick = await vscode.window.showQuickPick(
-    providers.map((p) => p.name),
-    { placeHolder: "Select provider to clear API key" }
-  );
+  const items = modelCache.models.map((m) => {
+    const caps = resolveCaps(m);
+    const badges = [];
+    if (caps.toolCalling) badges.push("🔧 tools");
+    if (caps.imageInput) badges.push("🖼 vision");
+    return {
+      label: m,
+      description: badges.length ? badges.join(" · ") : "text-only",
+      model: m,
+    };
+  });
+
+  const pick = await vscode.window.showQuickPick(items, {
+    placeHolder: "Select active FantasyAI model",
+  });
   if (!pick) return;
 
-  await deleteApiKey(context, pick);
-  vscode.window.showInformationMessage(`API key for "${pick}" deleted.`);
+  await cfg().update("activeModel", pick.model, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`Active model: ${pick.label}`);
+}
+
+async function cmdRefreshModels(context) {
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "FantasyAI: refreshing models…" },
+    () => fetchModelsAndCaps(context, { silent: false })
+  );
+  if (modelCache.models.length) {
+    vscode.window.showInformationMessage(`✅ ${modelCache.models.length} FantasyAI model(s) loaded.`);
+  }
+}
+
+async function cmdTestConnection(context) {
+  const apiKey = await getApiKey(context);
+  if (!apiKey) {
+    vscode.window.showWarningMessage("Set your FantasyAI API key first.");
+    return;
+  }
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Testing FantasyAI…" },
+    async () => {
+      try {
+        await callOpenAISimple(FANTASYAI_ENDPOINT, apiKey, "/models");
+        vscode.window.showInformationMessage("✅ FantasyAI is reachable.");
+      } catch (e) {
+        vscode.window.showErrorMessage(`❌ FantasyAI failed: ${e.message}`);
+      }
+    }
+  );
 }
 
 // ─── Chat Panel (WebView) ──────────────────────────────────────────────────
@@ -706,8 +570,8 @@ async function cmdOpenChat(context) {
   }
 
   chatPanel = vscode.window.createWebviewPanel(
-    "personalOpenAIChat",
-    "Personal OpenAI Chat",
+    "fantasyAIChat",
+    "FantasyAI Chat",
     vscode.ViewColumn.Two,
     { enableScripts: true, retainContextWhenHidden: true }
   );
@@ -718,30 +582,30 @@ async function cmdOpenChat(context) {
 
   chatPanel.webview.html = getChatHtml();
 
-  // Inject provider list on load
-  const providers = getProviders();
-  chatPanel.webview.postMessage({ type: "providers", providers });
+  const pushModels = () => {
+    chatPanel?.webview.postMessage({
+      type: "models",
+      models: modelCache.models,
+      activeModel: cfg().get("activeModel") || "",
+    });
+  };
+  pushModels();
 
-  // Handle messages from webview
+  const subModelChange = modelChangeEmitter?.event(pushModels);
+  if (subModelChange) chatPanel.onDidDispose(() => subModelChange.dispose());
+
   const abortControllers = new Map();
 
   chatPanel.webview.onDidReceiveMessage(async (msg) => {
     if (msg.type === "send") {
-      const { id, providerName, model, history } = msg;
-      const providers = getProviders();
-      const provider = providers.find((p) => p.name === providerName);
-      if (!provider) {
-        chatPanel?.webview.postMessage({
-          type: "error",
-          id,
-          text: "Provider not found.",
-        });
+      const { id, model, history } = msg;
+      const apiKey = await getApiKey(context);
+      if (!apiKey) {
+        chatPanel?.webview.postMessage({ type: "error", id, text: "Set your FantasyAI API key first." });
         return;
       }
-      const apiKey = await getApiKey(context, providerName);
       const systemPrompt =
-        cfg().get("systemPrompt") ||
-        "You are a helpful coding assistant inside VS Code.";
+        cfg().get("systemPrompt") || "You are a helpful coding assistant inside VS Code.";
       const messages = [
         { role: "system", content: systemPrompt },
         ...history,
@@ -753,7 +617,7 @@ async function cmdOpenChat(context) {
 
       try {
         for await (const chunk of callOpenAI(
-          provider.endpoint,
+          FANTASYAI_ENDPOINT,
           apiKey,
           model,
           messages,
@@ -764,11 +628,7 @@ async function cmdOpenChat(context) {
         chatPanel?.webview.postMessage({ type: "done", id });
       } catch (e) {
         if (e.name !== "AbortError") {
-          chatPanel?.webview.postMessage({
-            type: "error",
-            id,
-            text: e.message,
-          });
+          chatPanel?.webview.postMessage({ type: "error", id, text: e.message });
         }
       } finally {
         abortControllers.delete(id);
@@ -780,9 +640,9 @@ async function cmdOpenChat(context) {
       abortControllers.delete(msg.id);
     }
 
-    if (msg.type === "refreshProviders") {
-      const providers = getProviders();
-      chatPanel?.webview.postMessage({ type: "providers", providers });
+    if (msg.type === "refreshModels") {
+      await fetchModelsAndCaps(context);
+      pushModels();
     }
   });
 }
@@ -790,11 +650,11 @@ async function cmdOpenChat(context) {
 // ─── Language Model Provider (Copilot integration) ─────────────────────────
 
 function registerLanguageModels(context) {
-  const _onDidChange = new vscode.EventEmitter();
-  let disposable = null;
+  modelChangeEmitter = new vscode.EventEmitter();
+  context.subscriptions.push(modelChangeEmitter);
 
   // DeepSeek requires reasoning_content in history for tool_calls msgs
-  const reasoningCache = new Map(); // toolCallId → { text, timestamp }
+  const reasoningCache = new Map();
   const RC_MAX = 50;
   const RC_TTL = 5 * 60 * 1000;
   function pruneRC() {
@@ -807,35 +667,30 @@ function registerLanguageModels(context) {
     }
   }
 
-  /** Build the list of LanguageModelChatInformation objects from current config */
   function buildModelList() {
-    const providers = getProviders();
-    /** @type {vscode.LanguageModelChatInformation[]} */
-    const models = [];
-    for (const provider of providers) {
-      for (const modelId of provider.models || []) {
-        const caps = resolveCaps(provider, modelId);
-        const badge = caps.toolCalling ? " 🔧" : "";
-        models.push({
-          id: `${provider.name}/${modelId}`,
-          name: `${provider.name} / ${modelId}${badge}`,
-          vendor: "personal-openai",
-          family: provider.name,
-          version: "1.0",
-          maxInputTokens: provider.contextWindow ?? 128000,
-          maxOutputTokens: cfg().get("maxTokens") ?? 4096,
-          capabilities: {
-            toolCalling: caps.toolCalling,
-            imageInput: caps.imageInput,
-          },
-        });
-      }
-    }
-    return models;
+    const contextWindow = cfg().get("contextWindow") ?? 128000;
+    const maxOutputTokens = cfg().get("maxTokens") ?? 8192;
+    return modelCache.models.map((modelId) => {
+      const caps = resolveCaps(modelId);
+      const badge = caps.toolCalling ? " 🔧" : "";
+      return {
+        id: modelId,
+        name: `FantasyAI / ${modelId}${badge}`,
+        vendor: FANTASYAI_VENDOR,
+        family: "fantasyai",
+        version: "1.0",
+        maxInputTokens: contextWindow,
+        maxOutputTokens,
+        capabilities: {
+          toolCalling: caps.toolCalling,
+          imageInput: caps.imageInput,
+        },
+      };
+    });
   }
 
   const provider = {
-    onDidChangeLanguageModelChatInformation: _onDidChange.event,
+    onDidChangeLanguageModelChatInformation: modelChangeEmitter.event,
 
     async provideLanguageModelChatInformation(_options, _token) {
       return buildModelList();
@@ -843,30 +698,20 @@ function registerLanguageModels(context) {
 
     async provideLanguageModelChatResponse(model, messages, options, progress, token) {
       const tReqStart = Date.now();
-      // model.id is  "providerName/modelId"
-      const slash = model.id.indexOf("/");
-      const providerName = slash >= 0 ? model.id.slice(0, slash) : model.family;
-      const modelId = slash >= 0 ? model.id.slice(slash + 1) : model.id;
-
-      const providers = getProviders();
-      const cfgProvider = providers.find((p) => p.name === providerName);
-      if (!cfgProvider) {
-        throw new Error(`Provider "${providerName}" not found. Reconfigure providers.`);
-      }
-
-      // ── Respect per-model toolCalling setting (falls back to provider default) ──
-      const resolved = resolveCaps(cfgProvider, modelId);
+      const modelId = model.id;
+      const resolved = resolveCaps(modelId);
       const enableTools = resolved.toolCalling !== false;
 
-      debug(`[lm] REQ provider=${providerName} model=${modelId} msgs=${messages.length} tools=${enableTools ? options.tools?.length || 0 : "off"}`);
+      debug(`[lm] REQ model=${modelId} msgs=${messages.length} tools=${enableTools ? options.tools?.length || 0 : "off"}`);
 
-      const apiKey = await getApiKey(context, providerName);
-      const defaultSystemPrompt = "You are a helpful coding assistant inside VS Code.";
+      const apiKey = await getApiKey(context);
+      if (!apiKey) {
+        throw new Error("FantasyAI API key not set. Run \"FantasyAI: Set API Key\".");
+      }
+
       const systemPrompt =
-        cfg().get("systemPrompt") ||
-        defaultSystemPrompt;
+        cfg().get("systemPrompt") || "You are a helpful coding assistant inside VS Code.";
 
-      // ── Enhanced system prompt when tools are enabled ──────────────
       const toolSystemPrompt = enableTools
         ? `\n\nYou have access to tools for file editing, terminal commands, code search, and web browsing. CRITICAL RULES:
 1. ALWAYS provide ALL required parameters. Study each tool's schema carefully. Never call a tool with empty input {} or missing required fields.
@@ -878,7 +723,6 @@ function registerLanguageModels(context) {
 7. Before calling ANY tool, double-check: are ALL required parameters present and valid? If unsure, ask the user instead of guessing.`
         : "";
 
-      // ── Map incoming messages to OpenAI format ──────────────────────
       const tMapStart = Date.now();
       const openaiMessages = [
         { role: "system", content: systemPrompt + toolSystemPrompt },
@@ -893,7 +737,6 @@ function registerLanguageModels(context) {
           continue;
         }
 
-        // If tools disabled: flatten everything to plain text, no tool history
         if (!enableTools) {
           const text = msg.content
             .map((p) => (p && typeof p.value === "string" ? p.value : ""))
@@ -906,8 +749,6 @@ function registerLanguageModels(context) {
           continue;
         }
 
-        // Content is an array of parts: LanguageModelTextPart,
-        // LanguageModelToolCallPart, LanguageModelToolResultPart, etc.
         const textParts = [];
         const toolCalls = [];
         const toolResults = [];
@@ -915,7 +756,6 @@ function registerLanguageModels(context) {
         for (const part of msg.content) {
           if (!part) continue;
 
-          // Duck-typing: parts with `name` + `input` are tool calls (assistant)
           if (typeof part.name === "string" && part.input !== undefined) {
             toolCalls.push({
               id: part.callId || "",
@@ -929,7 +769,6 @@ function registerLanguageModels(context) {
             });
             debug(`[lm]   ← tool_call id=${part.callId} name=${part.name} input=${JSON.stringify(part.input).slice(0, 100)}`);
           } else if (typeof part.callId === "string") {
-            // LanguageModelToolResultPart (user)
             let resultContent = "";
             if (Array.isArray(part.content)) {
               resultContent = part.content
@@ -943,18 +782,14 @@ function registerLanguageModels(context) {
             toolResults.push({ callId: part.callId, content: resultContent });
             debug(`[lm]   ← tool_result id=${part.callId} content_len=${resultContent.length} preview="${resultContent.slice(0, 80)}"`);
           } else if (typeof part.value === "string") {
-            // LanguageModelTextPart
             textParts.push(part.value);
           }
         }
 
         const hasText = textParts.length > 0;
         const hasToolCalls = toolCalls.length > 0;
-        const hasToolResults = toolResults.length > 0;
 
-        // ── Assistant message with tool_calls ──────────────────────
         if (hasToolCalls) {
-          // Inject cached reasoning_content (DeepSeek requires this)
           let rc = "";
           for (const tc of toolCalls) {
             const c = reasoningCache.get("tool:" + tc.id) ?? reasoningCache.get(tc.id);
@@ -970,7 +805,6 @@ function registerLanguageModels(context) {
           continue;
         }
 
-        // ── Text-only message (user or assistant) ──────────────────
         if (hasText) {
           openaiMessages.push({
             role: msg.role === 1 ? "user" : "assistant",
@@ -978,9 +812,6 @@ function registerLanguageModels(context) {
           });
         }
 
-        // ── Tool results → emit as "tool" role messages directly ───
-        // CRITICAL: Do NOT emit a user message between assistant tool_calls
-        // and tool responses. OpenAI requires: assistant(tool_calls) → tool → tool → ...
         for (const tr of toolResults) {
           openaiMessages.push({
             role: "tool",
@@ -991,7 +822,6 @@ function registerLanguageModels(context) {
         }
       }
 
-      // ── Build tool definitions from options ────────────────────────
       const extraBody = {};
       if (enableTools && options.tools && Array.isArray(options.tools) && options.tools.length > 0) {
         extraBody.tools = options.tools.map((t) => ({
@@ -1012,11 +842,7 @@ function registerLanguageModels(context) {
         }
       }
 
-      // ── Tool call loop detection ──────────────────────────────────
-      // Only triggers when the *recent* tool calls are empty/invalid.
-      // Repeating a valid call (e.g. read_file on the same path after "continue")
-      // is NOT a loop — previously we scanned the entire history and disabled
-      // tools forever as soon as any call appeared 3 times.
+      // Tool call loop detection over recent calls only
       const toolCallHistory = [];
       for (const msg of messages) {
         const parts = Array.isArray(msg.content) ? msg.content : [];
@@ -1028,9 +854,8 @@ function registerLanguageModels(context) {
         }
       }
 
-      // Sliding window: look at the last N tool calls only.
       const LOOP_WINDOW = 6;
-      const LOOP_THRESHOLD = 4; // need ≥4 bad-recent calls to trigger
+      const LOOP_THRESHOLD = 4;
       const recent = toolCallHistory.slice(-LOOP_WINDOW);
 
       const isEmptyOrInvalid = (inputStr) => {
@@ -1038,13 +863,11 @@ function registerLanguageModels(context) {
           const o = JSON.parse(inputStr);
           return !o || typeof o !== "object" || Object.keys(o).length === 0;
         } catch {
-          return true; // unparseable args = bad
+          return true;
         }
       };
 
       const recentEmpty = recent.filter((tc) => isEmptyOrInvalid(tc.input)).length;
-
-      // Detect identical-call repetition within the window only
       const recentFreq = {};
       for (const tc of recent) {
         const sig = tc.name + "::" + tc.input;
@@ -1052,10 +875,6 @@ function registerLanguageModels(context) {
       }
       const recentMaxRepeat = Math.max(0, ...Object.values(recentFreq));
 
-      // Trigger only if BOTH conditions hold within the recent window:
-      // many of them are empty/invalid AND a single signature dominates.
-      // This avoids killing tools when the model legitimately re-reads a file
-      // multiple times across a long task.
       const loopDetected =
         recent.length >= LOOP_THRESHOLD &&
         recentEmpty >= LOOP_THRESHOLD &&
@@ -1063,19 +882,16 @@ function registerLanguageModels(context) {
 
       if (loopDetected && enableTools && extraBody.tools?.length) {
         debug(`[lm] ⚠ TOOL LOOP DETECTED — window=${recent.length} empty=${recentEmpty} maxRepeat=${recentMaxRepeat} → forcing text response`);
-        // Inject a strong instruction to stop using tools
         openaiMessages.push({
           role: "user",
           content: "SYSTEM OVERRIDE: You have repeatedly called tools with invalid or empty arguments. STOP calling tools immediately. Provide your final answer as plain text without any tool calls. Do NOT call any function."
         });
-        // Disable tools entirely for this request so the model CAN'T call them
         delete extraBody.tools;
         delete extraBody.tool_choice;
       } else if (recent.length > 0) {
         debug(`[lm] loop-check: window=${recent.length} empty=${recentEmpty} maxRepeat=${recentMaxRepeat} → ok`);
       }
 
-      // ── Stream from OpenAI ─────────────────────────────────────────
       const tMapEnd = Date.now();
       const toolMsgCount = openaiMessages.filter(m => m.role === "tool").length;
       const assistantTcCount = openaiMessages.filter(m => m.tool_calls?.length).length;
@@ -1090,7 +906,7 @@ function registerLanguageModels(context) {
 
       const runStream = async (body) => {
         for await (const chunk of callOpenAIWithTools(
-          cfgProvider.endpoint,
+          FANTASYAI_ENDPOINT,
           apiKey,
           modelId,
           openaiMessages,
@@ -1123,15 +939,14 @@ function registerLanguageModels(context) {
       } catch (err) {
         const msg = String(err?.message || "");
         const hadTools = !!extraBody.tools?.length;
-        // Runtime fallback: model rejects tools at the API level → retry without tools and persist
         if (hadTools && TOOL_ERR_RE.test(msg)) {
-          debug(`[lm] ⚠ tool rejection detected for ${providerName}/${modelId} → persisting toolCalling=false and retrying without tools`);
-          await patchModelCapability(providerName, modelId, {
+          debug(`[lm] ⚠ tool rejection for ${modelId} → persisting toolCalling=false and retrying without tools`);
+          await patchModelCapability(context, modelId, {
             toolCalling: false,
             imageInput: resolved.imageInput,
             source: "runtime",
           });
-          _onDidChange.fire(); // refresh VS Code's model list
+          modelChangeEmitter.fire();
           vscode.window.showWarningMessage(
             `Model "${modelId}" does not support tools — disabled tool calling and retrying.`
           );
@@ -1143,7 +958,7 @@ function registerLanguageModels(context) {
           throw err;
         }
       }
-      // Cache reasoning for DeepSeek history injection
+
       if (streamReasoning && streamToolCallIds.length > 0) {
         for (const id of streamToolCallIds) {
           reasoningCache.set("tool:" + id, { text: streamReasoning, timestamp: Date.now() });
@@ -1167,25 +982,15 @@ function registerLanguageModels(context) {
     },
   };
 
-  // Register (stable API: registerLanguageModelChatProvider)
   try {
-    disposable = vscode.lm.registerLanguageModelChatProvider("personal-openai", provider);
+    const disposable = vscode.lm.registerLanguageModelChatProvider(FANTASYAI_VENDOR, provider);
     context.subscriptions.push(disposable);
     debug("LM provider registered OK, models=" + buildModelList().length);
   } catch (e) {
-    console.error("personal-openai: registerLanguageModelChatProvider failed:", e);
+    console.error("fantasyai: registerLanguageModelChatProvider failed:", e);
     debug("❌ LM registration FAILED: " + e.message);
-    vscode.window.showErrorMessage("Personal OpenAI: LM registration failed — " + e.message);
+    vscode.window.showErrorMessage("FantasyAI: LM registration failed — " + e.message);
   }
-
-  // Notify VS Code when provider config changes so Copilot refreshes its model list
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("personalOpenAI.providers")) {
-        _onDidChange.fire();
-      }
-    })
-  );
 }
 
 // ─── Status Bar ────────────────────────────────────────────────────────────
@@ -1195,494 +1000,31 @@ function createStatusBar(context) {
     vscode.StatusBarAlignment.Right,
     100
   );
-  bar.command = "personalOpenAI.pickModel";
-  bar.tooltip = "Click to switch Personal OpenAI model";
+  bar.command = "fantasyAI.pickModel";
+  bar.tooltip = "Click to switch FantasyAI model";
   context.subscriptions.push(bar);
 
   const update = () => {
     const active = cfg().get("activeModel");
-    const provider = cfg().get("activeProvider");
     if (active) {
       bar.text = `$(hubot) ${active}`;
-      bar.show();
-    } else if (getProviders().length > 0) {
+    } else if (modelCache.models.length > 0) {
       bar.text = `$(hubot) Pick model`;
-      bar.show();
     } else {
-      bar.hide();
+      bar.text = `$(hubot) FantasyAI`;
     }
+    bar.show();
   };
 
   update();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("personalOpenAI")) update();
+      if (e.affectsConfiguration("fantasyAI")) update();
     })
   );
-}
-
-// ─── Config WebView HTML ───────────────────────────────────────────────────
-
-function getConfigHtml(providers) {
-  const providerJson = JSON.stringify(providers);
-  return /* html */ `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Configure Provider</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--vscode-editor-foreground);
-    background: var(--vscode-editor-background);
-    padding: 24px;
-    max-width: 640px;
+  if (modelChangeEmitter) {
+    context.subscriptions.push(modelChangeEmitter.event(update));
   }
-  h2 { margin-bottom: 20px; font-size: 1.2em; }
-  h3 { margin-bottom: 14px; font-size: 1em; }
-  label { display: block; margin-bottom: 4px; opacity: 0.8; font-size: 0.9em; }
-  input, select, textarea {
-    width: 100%;
-    background: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border, #555);
-    border-radius: 4px;
-    padding: 7px 10px;
-    font-family: inherit;
-    font-size: inherit;
-    margin-bottom: 14px;
-  }
-  input:focus, select:focus, textarea:focus {
-    outline: 1px solid var(--vscode-focusBorder);
-    border-color: var(--vscode-focusBorder);
-  }
-  .row { display: flex; gap: 8px; align-items: flex-start; }
-  .row input { margin-bottom: 0; }
-  .field { margin-bottom: 14px; }
-  .field > input, .field > select, .field > textarea { margin-bottom: 0; }
-  button {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none;
-    border-radius: 4px;
-    padding: 7px 16px;
-    cursor: pointer;
-    font-size: inherit;
-    font-family: inherit;
-  }
-  button:hover { opacity: 0.85; }
-  button.secondary {
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-  }
-  button.danger {
-    background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
-    color: var(--vscode-button-foreground);
-  }
-  .btn-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-  .divider { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 24px 0; }
-  .providers-list { margin-bottom: 20px; }
-  .provider-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-input-border, #555);
-    border-radius: 6px;
-    margin-bottom: 8px;
-    cursor: pointer;
-  }
-  .provider-item:hover { border-color: var(--vscode-focusBorder); }
-  .provider-item .pname { font-weight: 600; }
-  .provider-item .pdetail { font-size: 0.82em; opacity: 0.65; margin-top: 2px; }
-  .toast {
-    position: fixed; bottom: 20px; right: 20px;
-    background: var(--vscode-notificationCenterHeader-background, #333);
-    color: var(--vscode-foreground);
-    padding: 10px 18px;
-    border-radius: 6px;
-    opacity: 0;
-    transition: opacity 0.3s;
-    pointer-events: none;
-    font-size: 0.9em;
-  }
-  .toast.show { opacity: 1; }
-  .model-tag {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: var(--vscode-badge-background);
-    color: var(--vscode-badge-foreground);
-    border-radius: 4px;
-    padding: 2px 8px;
-    margin: 2px;
-    font-size: 0.85em;
-  }
-  .model-tag .cap {
-    font-size: 0.95em;
-    cursor: help;
-    user-select: none;
-  }
-  .model-tag .cap.unknown { opacity: 0.35; }
-  .model-tag .cap.no { opacity: 0.85; filter: grayscale(1); }
-  .model-tag button {
-    background: none; border: none; color: inherit;
-    padding: 0 2px; cursor: pointer; font-size: 1em; line-height: 1;
-  }
-  #capsProgress {
-    font-size: 0.85em; opacity: 0.7; margin-top: 4px;
-    display: flex; align-items: center; gap: 6px;
-  }
-  #capsProgress .bar {
-    flex: 1; height: 4px; background: var(--vscode-input-background);
-    border-radius: 2px; overflow: hidden;
-  }
-  #capsProgress .bar > span {
-    display: block; height: 100%; background: var(--vscode-progressBar-background, #0e639c);
-    width: 0; transition: width 0.2s;
-  }
-  #modelTags { display: flex; flex-wrap: wrap; margin-bottom: 8px; min-height: 28px; }
-  #fetchStatus { font-size: 0.85em; opacity: 0.7; margin-top: 4px; }
-  .toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-  .toggle-row label { margin: 0; opacity: 1; }
-  input[type=checkbox] { width: auto; margin: 0; }
-  input[type=password] { letter-spacing: 2px; }
-  #showKey { cursor: pointer; font-size: 0.85em; opacity: 0.7; margin-bottom: 14px; display: block; text-decoration: underline; background: none; border: none; color: inherit; padding: 0; }
-</style>
-</head>
-<body>
-<h2>⚙️ Configure Providers</h2>
-
-<div class="providers-list" id="providerList"></div>
-<button class="secondary" id="newBtn">➕ Add new provider</button>
-
-<hr class="divider">
-
-<div id="formSection" style="display:none">
-  <h3 id="formTitle">New Provider</h3>
-
-  <label>Display name</label>
-  <input type="text" id="fName" placeholder="e.g. Ollama Local">
-
-  <label>Base URL</label>
-  <input type="text" id="fEndpoint" placeholder="e.g. http://localhost:11434/v1">
-
-  <label>API Key</label>
-  <input type="password" id="fApiKey" placeholder="Leave blank if not required or to keep existing">
-  <button id="showKey">Show / hide key</button>
-
-  <label>Models <span style="opacity:0.6;font-weight:normal">— 🔧 = tools supported · click badge to toggle</span></label>
-  <div id="modelTags"></div>
-  <div class="row">
-    <input type="text" id="modelInput" placeholder="model-id, press Enter or comma to add">
-    <button class="secondary" id="fetchBtn" style="white-space:nowrap">Fetch from API</button>
-    <button class="secondary" id="detectBtn" style="white-space:nowrap" title="Re-detect tool/vision capabilities">🔍 Detect</button>
-  </div>
-  <div id="fetchStatus"></div>
-  <div id="capsProgress" style="display:none">
-    <span id="capsLabel"></span>
-    <div class="bar"><span id="capsBar"></span></div>
-  </div>
-
-  <div style="margin-top:14px">
-    <label>Default model</label>
-    <select id="fDefaultModel"><option value="">— none —</option></select>
-  </div>
-
-  <div style="margin-top:14px">
-    <label>Context window (tokens)</label>
-    <input type="number" id="fContextWindow" value="128000" min="1024">
-  </div>
-
-  <div class="toggle-row" style="margin-top:8px">
-    <input type="checkbox" id="fToolCalling" checked>
-    <label for="fToolCalling">Tool calling (agent mode)</label>
-  </div>
-  <div class="toggle-row">
-    <input type="checkbox" id="fImageInput">
-    <label for="fImageInput">Image input (vision models)</label>
-  </div>
-
-  <div class="btn-row">
-    <button id="saveBtn">💾 Save</button>
-    <button class="secondary" id="cancelBtn">Cancel</button>
-    <button class="danger" id="deleteBtn" style="display:none">🗑 Delete</button>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-const vscode = acquireVsCodeApi();
-let providers = ${providerJson};
-let editingName = null;
-let models = [];
-let modelCaps = {}; // { modelId: { toolCalling, imageInput, source } }
-
-// ── Render provider list ──
-
-function renderList() {
-  const el = document.getElementById("providerList");
-  if (!providers.length) {
-    el.innerHTML = '<div style="opacity:0.5;margin-bottom:8px">No providers yet.</div>';
-    return;
-  }
-  el.innerHTML = providers.map(p => \`
-    <div class="provider-item" data-name="\${esc(p.name)}" onclick="editProvider(this.dataset.name)">
-      <div>
-        <div class="pname">\${esc(p.name)}</div>
-        <div class="pdetail">\${esc(p.endpoint)} · \${p.models?.length ?? 0} model(s)</div>
-      </div>
-      <span style="opacity:0.4">✏️</span>
-    </div>\`).join("");
-}
-
-function esc(s) {
-  return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-}
-
-// ── Model tags ──
-
-function capBadge(m) {
-  const c = modelCaps[m];
-  if (!c) {
-    return \`<span class="cap unknown" data-retry="\${esc(m)}" title="Not detected yet — click to probe">❓</span>\`;
-  }
-  if (c.source === "timeout") {
-    return \`<span class="cap unknown" data-retry="\${esc(m)}" title="Probe timed out — click to retry with 60s timeout">⏱</span>\`;
-  }
-  if (c.source === "error" || typeof c.toolCalling !== "boolean") {
-    return \`<span class="cap unknown" data-retry="\${esc(m)}" title="Probe failed — click to retry">⚠</span>\`;
-  }
-  return c.toolCalling
-    ? \`<span class="cap" data-cap="tool" data-model="\${esc(m)}" title="Tools supported (\${esc(c.source || "")}) — click to override">🔧</span>\`
-    : \`<span class="cap no" data-cap="tool" data-model="\${esc(m)}" title="No tool support (\${esc(c.source || "")}) — click to override">🚫</span>\`;
-}
-
-function renderTags() {
-  document.getElementById("modelTags").innerHTML =
-    models.map((m, i) =>
-      \`<span class="model-tag">\${esc(m)} \${capBadge(m)}<button onclick="removeModel(\${i})" title="Remove">✕</button></span>\`
-    ).join("");
-  // Wire click handlers on cap badges (toggle override)
-  document.querySelectorAll("#modelTags .cap[data-cap='tool']").forEach(el => {
-    el.addEventListener("click", () => {
-      const m = el.getAttribute("data-model");
-      const cur = modelCaps[m] || { toolCalling: true, imageInput: false };
-      modelCaps[m] = { ...cur, toolCalling: !cur.toolCalling, source: "manual" };
-      renderTags();
-    });
-  });
-  // Retry handler for unknown/timeout badges — single-model probe with extended timeout
-  document.querySelectorAll("#modelTags .cap.unknown[data-retry]").forEach(el => {
-    el.addEventListener("click", () => {
-      const m = el.getAttribute("data-retry");
-      const endpoint = document.getElementById("fEndpoint").value.trim();
-      const apiKey = document.getElementById("fApiKey").value.trim();
-      const name = document.getElementById("fName").value.trim();
-      if (!endpoint) return;
-      el.textContent = "⏳";
-      vscode.postMessage({
-        type: "detectCapabilities",
-        endpoint, apiKey, name,
-        models: [m],
-        timeoutMs: 60000,
-        concurrency: 1,
-      });
-    });
-  });
-  const sel = document.getElementById("fDefaultModel");
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">— none —</option>' +
-    models.map(m => \`<option value="\${esc(m)}" \${m===cur?"selected":""}>\${esc(m)}</option>\`).join("");
-}
-
-function addModel(id) {
-  const parts = id.split(",").map(s => s.trim()).filter(Boolean);
-  for (const p of parts) if (!models.includes(p)) models.push(p);
-  renderTags();
-}
-
-function removeModel(i) {
-  const m = models[i];
-  models.splice(i, 1);
-  if (m) delete modelCaps[m];
-  renderTags();
-}
-
-document.getElementById("modelInput").addEventListener("keydown", e => {
-  if (e.key === "Enter" || e.key === ",") {
-    e.preventDefault();
-    addModel(e.target.value);
-    e.target.value = "";
-  }
-});
-document.getElementById("modelInput").addEventListener("blur", e => {
-  if (e.target.value.trim()) { addModel(e.target.value); e.target.value = ""; }
-});
-
-// ── Form open/close ──
-
-function openForm(provider = null) {
-  editingName = provider ? provider.name : null;
-  models = provider ? [...(provider.models || [])] : [];
-  modelCaps = provider ? { ...(provider.modelCapabilities || {}) } : {};
-
-  document.getElementById("fName").value = provider?.name || "";
-  document.getElementById("fEndpoint").value = provider?.endpoint || "";
-  document.getElementById("fApiKey").value = "";
-  document.getElementById("fContextWindow").value = provider?.contextWindow ?? 128000;
-  document.getElementById("fToolCalling").checked = provider?.toolCalling ?? true;
-  document.getElementById("fImageInput").checked = provider?.imageInput ?? false;
-  document.getElementById("fetchStatus").textContent = "";
-  document.getElementById("modelInput").value = "";
-  document.getElementById("formTitle").textContent = provider ? \`Edit: \${provider.name}\` : "New Provider";
-  document.getElementById("deleteBtn").style.display = provider ? "" : "none";
-  renderTags();
-  document.getElementById("formSection").style.display = "";
-  document.getElementById("fName").focus();
-}
-
-function closeForm() {
-  document.getElementById("formSection").style.display = "none";
-  editingName = null;
-}
-
-function editProvider(name) {
-  const p = providers.find(p => p.name === name);
-  if (p) openForm(p);
-}
-
-document.getElementById("newBtn").addEventListener("click", () => openForm(null));
-document.getElementById("cancelBtn").addEventListener("click", closeForm);
-
-// ── Show/hide key ──
-document.getElementById("showKey").addEventListener("click", () => {
-  const inp = document.getElementById("fApiKey");
-  inp.type = inp.type === "password" ? "text" : "password";
-});
-
-// ── Fetch models ──
-document.getElementById("fetchBtn").addEventListener("click", () => {
-  const endpoint = document.getElementById("fEndpoint").value.trim();
-  const apiKey = document.getElementById("fApiKey").value.trim();
-  const name = document.getElementById("fName").value.trim();
-  if (!endpoint) { document.getElementById("fetchStatus").textContent = "⚠ Enter a base URL first."; return; }
-  document.getElementById("fetchStatus").textContent = "⏳ Fetching…";
-  vscode.postMessage({ type: "fetchModels", endpoint, apiKey, name });
-});
-
-// ── Re-detect capabilities for current models ──
-document.getElementById("detectBtn").addEventListener("click", () => {
-  const endpoint = document.getElementById("fEndpoint").value.trim();
-  const apiKey = document.getElementById("fApiKey").value.trim();
-  const name = document.getElementById("fName").value.trim();
-  if (!endpoint || !models.length) {
-    document.getElementById("fetchStatus").textContent = "⚠ Need endpoint and at least one model.";
-    return;
-  }
-  vscode.postMessage({ type: "detectCapabilities", endpoint, apiKey, name, models });
-});
-
-// ── Save ──
-document.getElementById("saveBtn").addEventListener("click", () => {
-  const name = document.getElementById("fName").value.trim();
-  const endpoint = document.getElementById("fEndpoint").value.trim();
-  if (!name) { alert("Name is required."); return; }
-  if (!endpoint) { alert("Endpoint is required."); return; }
-
-  vscode.postMessage({
-    type: "save",
-    name,
-    endpoint,
-    apiKey: document.getElementById("fApiKey").value,
-    models,
-    defaultModel: document.getElementById("fDefaultModel").value,
-    toolCalling: document.getElementById("fToolCalling").checked,
-    imageInput: document.getElementById("fImageInput").checked,
-    contextWindow: document.getElementById("fContextWindow").value,
-    modelCapabilities: modelCaps,
-    editingName,
-  });
-});
-
-// ── Delete ──
-document.getElementById("deleteBtn").addEventListener("click", () => {
-  if (!editingName) return;
-  if (!confirm(\`Delete provider "\${editingName}"?\`)) return;
-  vscode.postMessage({ type: "delete", name: editingName });
-});
-
-// ── Toast ──
-function toast(msg) {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.classList.add("show");
-  setTimeout(() => el.classList.remove("show"), 2500);
-}
-
-// ── Messages from extension ──
-window.addEventListener("message", ({ data }) => {
-  if (data.type === "models") {
-    models = data.models;
-    // Drop caps for models that disappeared, keep the rest
-    const kept = {};
-    for (const m of models) if (modelCaps[m]) kept[m] = modelCaps[m];
-    modelCaps = kept;
-    renderTags();
-    document.getElementById("fetchStatus").textContent = \`✅ \${models.length} model(s) fetched.\`;
-  }
-  if (data.type === "fetchError") {
-    document.getElementById("fetchStatus").textContent = "❌ " + data.message;
-  }
-  if (data.type === "capsProgress") {
-    const wrap = document.getElementById("capsProgress");
-    wrap.style.display = "";
-    const pct = data.total ? Math.round((data.done / data.total) * 100) : 0;
-    document.getElementById("capsLabel").textContent =
-      \`🔍 Detecting capabilities \${data.done}/\${data.total}\` + (data.current ? \` · \${data.current}\` : "");
-    document.getElementById("capsBar").style.width = pct + "%";
-  }
-  if (data.type === "capsResult") {
-    // Merge: don't override manual entries
-    for (const [m, c] of Object.entries(data.capabilities || {})) {
-      if (modelCaps[m]?.source === "manual") continue;
-      modelCaps[m] = c;
-    }
-    renderTags();
-    document.getElementById("capsLabel").textContent = \`✅ Detected \${Object.keys(data.capabilities || {}).length} model(s)\`;
-    setTimeout(() => { document.getElementById("capsProgress").style.display = "none"; }, 2500);
-  }
-  if (data.type === "capsError") {
-    document.getElementById("capsLabel").textContent = "❌ Detection failed: " + data.message;
-  }
-  if (data.type === "saved") {
-    // Reload provider list with full updated object
-    const savedProvider = data.provider;
-    if (data.editingName) {
-      providers = providers.map(p => p.name === data.editingName ? savedProvider : p);
-    } else {
-      providers.push(savedProvider);
-    }
-    renderList();
-    closeForm();
-    toast(\`✅ Provider "\${savedProvider.name}" saved.\`);
-  }
-  if (data.type === "deleted") {
-    providers = providers.filter(p => p.name !== data.name);
-    renderList();
-    closeForm();
-    toast(\`🗑 Provider "\${data.name}" deleted.\`);
-  }
-});
-
-// Init
-renderList();
-</script>
-</body>
-</html>`;
 }
 
 // ─── Chat WebView HTML ─────────────────────────────────────────────────────
@@ -1693,7 +1035,7 @@ function getChatHtml() {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Personal OpenAI Chat</title>
+<title>FantasyAI Chat</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -1807,10 +1149,9 @@ function getChatHtml() {
 </head>
 <body>
 <div id="toolbar">
-  <select id="providerSelect"><option>No providers</option></select>
   <select id="modelSelect"><option>No models</option></select>
   <button id="clearBtn" title="Clear chat">🗑</button>
-  <button id="refreshBtn" title="Refresh providers">↺</button>
+  <button id="refreshBtn" title="Refresh models">↺</button>
 </div>
 <div id="messages"><div id="empty">Start a conversation…</div></div>
 <div id="inputArea">
@@ -1821,11 +1162,11 @@ function getChatHtml() {
 
 <script>
 const vscode = acquireVsCodeApi();
-let providers = [];
+let models = [];
+let activeModel = "";
 let history = [];
 let currentId = null;
 
-const providerSel = document.getElementById("providerSelect");
 const modelSel = document.getElementById("modelSelect");
 const messages = document.getElementById("messages");
 const input = document.getElementById("input");
@@ -1833,16 +1174,8 @@ const sendBtn = document.getElementById("sendBtn");
 const stopBtn = document.getElementById("stopBtn");
 const empty = document.getElementById("empty");
 
-// ── Provider / model selectors ──
-
-providerSel.addEventListener("change", () => {
-  const p = providers.find(p => p.name === providerSel.value);
-  modelSel.innerHTML = (p?.models || []).map(m =>
-    \`<option value="\${m}">\${m}</option>\`).join("") || "<option>No models</option>";
-});
-
 document.getElementById("refreshBtn").addEventListener("click", () => {
-  vscode.postMessage({ type: "refreshProviders" });
+  vscode.postMessage({ type: "refreshModels" });
 });
 
 document.getElementById("clearBtn").addEventListener("click", () => {
@@ -1852,15 +1185,12 @@ document.getElementById("clearBtn").addEventListener("click", () => {
   empty.style.display = "";
 });
 
-// ── Send message ──
-
 function sendMessage() {
   const text = input.value.trim();
   if (!text || currentId) return;
-  const providerName = providerSel.value;
   const model = modelSel.value;
-  if (!providerName || providerName === "No providers") {
-    appendMsg("No provider selected.", "error"); return;
+  if (!model || model === "No models") {
+    appendMsg("No model selected.", "error"); return;
   }
 
   empty.style.display = "none";
@@ -1870,7 +1200,7 @@ function sendMessage() {
   input.style.height = "auto";
 
   currentId = Math.random().toString(36).slice(2);
-  vscode.postMessage({ type: "send", id: currentId, providerName, model, history });
+  vscode.postMessage({ type: "send", id: currentId, model, history });
 }
 
 sendBtn.addEventListener("click", sendMessage);
@@ -1887,8 +1217,6 @@ input.addEventListener("input", () => {
   input.style.height = Math.min(input.scrollHeight, 200) + "px";
 });
 
-// ── Message rendering ──
-
 let currentEl = null;
 let currentText = "";
 
@@ -1901,15 +1229,13 @@ function appendMsg(text, role) {
   return el;
 }
 
-// ── Handle messages from extension ──
-
 window.addEventListener("message", ({ data }) => {
-  if (data.type === "providers") {
-    providers = data.providers || [];
-    providerSel.innerHTML = providers.length
-      ? providers.map(p => \`<option value="\${p.name}">\${p.name}</option>\`).join("")
-      : "<option>No providers</option>";
-    providerSel.dispatchEvent(new Event("change"));
+  if (data.type === "models") {
+    models = data.models || [];
+    activeModel = data.activeModel || "";
+    modelSel.innerHTML = models.length
+      ? models.map(m => \`<option value="\${m}" \${m===activeModel?"selected":""}>\${m}</option>\`).join("")
+      : "<option>No models</option>";
     return;
   }
 
@@ -1949,38 +1275,72 @@ window.addEventListener("message", ({ data }) => {
 
 // ─── Activate / Deactivate ─────────────────────────────────────────────────
 
-function activate(context) {
+async function activate(context) {
   try {
     initDebugLog(context);
-    debug("activate() called — extension starting");
-    createStatusBar(context);
-    registerLanguageModels(context);
+    debug("activate() called — FantasyAI extension starting");
 
-    vscode.window.showInformationMessage("Personal OpenAI: extension activée ✓");
+    loadCacheFromStorage(context);
+    registerLanguageModels(context);
+    createStatusBar(context);
 
     context.subscriptions.push(
-      vscode.commands.registerCommand("personalOpenAI.openChat", () =>
-        cmdOpenChat(context)
-      ),
-      vscode.commands.registerCommand("personalOpenAI.configureProvider", () =>
-        cmdConfigureProvider(context)
-      ),
-      vscode.commands.registerCommand("personalOpenAI.pickModel", () =>
-        cmdPickModel(context)
-      ),
-      vscode.commands.registerCommand("personalOpenAI.testConnection", () =>
-        cmdTestConnection(context)
-      ),
-      vscode.commands.registerCommand("personalOpenAI.clearApiKey", () =>
-        cmdClearApiKey(context)
-      )
+      vscode.commands.registerCommand("fantasyAI.openChat", () => cmdOpenChat(context)),
+      vscode.commands.registerCommand("fantasyAI.setApiKey", () => cmdSetApiKey(context)),
+      vscode.commands.registerCommand("fantasyAI.clearApiKey", () => cmdClearApiKey(context)),
+      vscode.commands.registerCommand("fantasyAI.pickModel", () => cmdPickModel(context)),
+      vscode.commands.registerCommand("fantasyAI.refreshModels", () => cmdRefreshModels(context)),
+      vscode.commands.registerCommand("fantasyAI.testConnection", () => cmdTestConnection(context))
     );
+
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("fantasyAI.modelRefreshIntervalMs")) {
+          startAutoRefresh(context);
+        }
+        if (e.affectsConfiguration("fantasyAI.activeModel") ||
+            e.affectsConfiguration("fantasyAI.contextWindow") ||
+            e.affectsConfiguration("fantasyAI.maxTokens")) {
+          modelChangeEmitter?.fire();
+        }
+      })
+    );
+
+    // Kick off the first auto-refresh (silent — no popup if key is missing)
+    fetchModelsAndCaps(context).then(() => {
+      if (!modelCache.models.length) {
+        getApiKey(context).then((key) => {
+          if (!key) {
+            vscode.window.showInformationMessage(
+              "FantasyAI: set your API key to load models.",
+              "Set API Key"
+            ).then((choice) => {
+              if (choice === "Set API Key") {
+                vscode.commands.executeCommand("fantasyAI.setApiKey");
+              }
+            });
+          }
+        });
+      }
+    });
+
+    startAutoRefresh(context);
+
+    context.subscriptions.push({
+      dispose() {
+        if (refreshTimer) clearInterval(refreshTimer);
+        refreshTimer = null;
+      },
+    });
   } catch (e) {
-    console.error("[personal-openai] Fatal activation error:", e);
-    vscode.window.showErrorMessage(`Personal OpenAI: activation failed - ${e.message}`);
+    console.error("[fantasyai] Fatal activation error:", e);
+    vscode.window.showErrorMessage(`FantasyAI: activation failed - ${e.message}`);
   }
 }
 
-function deactivate() {}
+function deactivate() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = null;
+}
 
 module.exports = { activate, deactivate };

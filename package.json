@@ -1,126 +1,101 @@
 {
-  "name": "personal-openai-chat",
-  "displayName": "Personal OpenAI Chat",
-  "description": "Connect VS Code to any OpenAI-compatible endpoint (Ollama, Deepseek, OpenRouter, Azure OpenAI, etc.) as a native Copilot Chat model.",
+  "name": "fantasyai-copilot",
+  "displayName": "FantasyAI for Copilot",
+  "description": "Use FantasyAI as a native Copilot Chat language model provider.",
   "version": "1.0.0",
-  "publisher": "yourname",
+  "publisher": "fantasyai",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourname/personal-openai-chat.git"
+    "url": "https://github.com/fantasyai/fantasyai-copilot.git"
   },
-  "keywords": ["openai", "ollama", "deepseek", "copilot", "ai", "chat"],
+  "keywords": ["fantasyai", "copilot", "ai", "chat"],
   "engines": { "vscode": "^1.90.0" },
   "categories": ["AI", "Chat", "Other"],
   "icon": "icon.png",
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:personalOpenAI.openChat",
-    "onCommand:personalOpenAI.configureProvider",
-    "onCommand:personalOpenAI.pickModel",
-    "onCommand:personalOpenAI.testConnection",
-    "onCommand:personalOpenAI.clearApiKey"
+    "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "personalOpenAI.openChat",          "title": "Personal OpenAI: Open Chat" },
-      { "command": "personalOpenAI.configureProvider", "title": "Personal OpenAI: Configure Provider" },
-      { "command": "personalOpenAI.pickModel",         "title": "Personal OpenAI: Pick Model" },
-      { "command": "personalOpenAI.testConnection",    "title": "Personal OpenAI: Test Connection" },
-      { "command": "personalOpenAI.clearApiKey",       "title": "Personal OpenAI: Clear Saved API Key" }
+      { "command": "fantasyAI.openChat",       "title": "FantasyAI: Open Chat" },
+      { "command": "fantasyAI.setApiKey",      "title": "FantasyAI: Set API Key" },
+      { "command": "fantasyAI.clearApiKey",    "title": "FantasyAI: Clear API Key" },
+      { "command": "fantasyAI.pickModel",      "title": "FantasyAI: Pick Model" },
+      { "command": "fantasyAI.refreshModels",  "title": "FantasyAI: Refresh Models" },
+      { "command": "fantasyAI.testConnection", "title": "FantasyAI: Test Connection" }
     ],
     "configuration": {
-      "title": "Personal OpenAI",
+      "title": "FantasyAI",
       "properties": {
-        "personalOpenAI.providers": {
-          "type": "array",
-          "default": [],
-          "description": "List of OpenAI-compatible providers.",
-          "items": {
-            "type": "object",
-            "required": ["name", "endpoint", "models"],
-            "properties": {
-              "name":          { "type": "string" },
-              "endpoint":      { "type": "string" },
-              "models":        { "type": "array", "items": { "type": "string" } },
-              "defaultModel":  { "type": "string" },
-              "toolCalling":   { "type": "boolean", "default": true, "description": "Default tool-calling capability used as fallback when a model has no entry in modelCapabilities." },
-              "imageInput":    { "type": "boolean", "default": false },
-              "contextWindow": { "type": "number",  "default": 128000 },
-              "modelCapabilities": {
-                "type": "object",
-                "default": {},
-                "description": "Per-model capability overrides keyed by model id. Auto-populated by capability detection.",
-                "additionalProperties": {
-                  "type": "object",
-                  "properties": {
-                    "toolCalling": { "type": "boolean" },
-                    "imageInput":  { "type": "boolean" },
-                    "source":      { "type": "string", "enum": ["openrouter", "ollama", "probe", "runtime", "manual"] }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "personalOpenAI.activeProvider": {
+        "fantasyAI.activeModel": {
           "type": "string",
           "default": "",
-          "description": "Currently active provider name."
+          "description": "Currently active FantasyAI model ID."
         },
-        "personalOpenAI.activeModel": {
-          "type": "string",
-          "default": "",
-          "description": "Currently active model ID."
-        },
-        "personalOpenAI.temperature": {
+        "fantasyAI.temperature": {
           "type": "number",
           "default": 0.2,
           "minimum": 0,
-          "maximum": 2
+          "maximum": 2,
+          "description": "Sampling temperature (0–2)."
         },
-        "personalOpenAI.maxTokens": {
+        "fantasyAI.maxTokens": {
           "type": "number",
           "default": 8192,
-          "minimum": 1
+          "minimum": 1,
+          "description": "Maximum output tokens per response."
         },
-        "personalOpenAI.systemPrompt": {
+        "fantasyAI.contextWindow": {
+          "type": "number",
+          "default": 128000,
+          "minimum": 1024,
+          "description": "Context window advertised to Copilot."
+        },
+        "fantasyAI.systemPrompt": {
           "type": "string",
           "default": "You are a helpful coding assistant inside VS Code."
         },
-        "personalOpenAI.requestTimeoutMs": {
+        "fantasyAI.requestTimeoutMs": {
           "type": "number",
           "default": 120000,
           "minimum": 1000
         },
-        "personalOpenAI.detection.timeoutMs": {
+        "fantasyAI.modelRefreshIntervalMs": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 30000,
+          "description": "How often (ms) to auto-refresh the model list. Minimum 30s."
+        },
+        "fantasyAI.detection.timeoutMs": {
           "type": "number",
           "default": 30000,
           "minimum": 1000,
           "description": "Per-model probe timeout (ms) during capability detection."
         },
-        "personalOpenAI.detection.concurrency": {
+        "fantasyAI.detection.concurrency": {
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "description": "Parallel probes during detection. 0 = auto (1 for localhost/Ollama/vLLM, 6 for OpenRouter, 4 otherwise)."
+          "description": "Parallel probes during capability detection. 0 = auto."
         }
       }
     },
     "languageModelChatProviders": [
       {
-        "vendor": "personal-openai",
-        "displayName": "Personal OpenAI"
+        "vendor": "fantasyai",
+        "displayName": "FantasyAI"
       }
     ],
     "menus": {
       "commandPalette": [
-        { "command": "personalOpenAI.openChat" },
-        { "command": "personalOpenAI.configureProvider" },
-        { "command": "personalOpenAI.pickModel" },
-        { "command": "personalOpenAI.testConnection" },
-        { "command": "personalOpenAI.clearApiKey" }
+        { "command": "fantasyAI.openChat" },
+        { "command": "fantasyAI.setApiKey" },
+        { "command": "fantasyAI.clearApiKey" },
+        { "command": "fantasyAI.pickModel" },
+        { "command": "fantasyAI.refreshModels" },
+        { "command": "fantasyAI.testConnection" }
       ]
     }
   },
