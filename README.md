@@ -52,7 +52,6 @@ That's it — no endpoint or provider configuration required.
 | `fantasyAI.contextWindow` | `128000` | Context window advertised to Copilot |
 | `fantasyAI.systemPrompt` | `"You are a helpful…"` | System prompt |
 | `fantasyAI.requestTimeoutMs` | `120000` | Request timeout (ms) |
-| `fantasyAI.modelRefreshIntervalMs` | `300000` | Auto-refresh interval (ms, min 30s) |
 | `fantasyAI.detection.timeoutMs` | `30000` | Per-model probe timeout (ms) |
 | `fantasyAI.detection.concurrency` | `0` | Parallel probes (`0` = auto) |
 

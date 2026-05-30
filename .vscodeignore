@@ -1,5 +1,33 @@
 .vscode/**
+.vscode-test/**
 node_modules/**
-scripts/**
+
+# Source control & editor noise
+.git/**
 .gitignore
+.gitattributes
+.github/**
+.idea/**
+*.swp
+*.swo
+
+# Build / dev artifacts
 *.vsix
+out/**
+dist/**
+build/**
+coverage/**
+
+# Logs & temp
+*.log
+debug.log
+test.txt
+*.tmp
+
+# Dev-only scripts (kept out of the published bundle)
+install-local.mjs
+
+# Lockfile not needed in marketplace bundle
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

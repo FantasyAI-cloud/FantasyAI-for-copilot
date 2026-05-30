@@ -6,7 +6,7 @@ const os = require("os");
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-const FANTASYAI_ENDPOINT = "https://fantasyai.cloud/api/v1";
+const FANTASYAI_ENDPOINT = "http://localhost:3000/api/v1";
 const FANTASYAI_VENDOR = "fantasyai";
 const SECRET_KEY = "fantasyAI.apiKey";
 const CACHE_KEY = "fantasyAI.modelCache";
@@ -57,12 +57,11 @@ async function deleteApiKeySecret(context) {
   await context.secrets.delete(SECRET_KEY);
 }
 
-// ─── Model cache (auto-refreshed) ──────────────────────────────────────────
+// ─── Model cache ─────────────────────────────────────────────────────────────
 
 /** @type {{ models: string[], capabilities: Record<string, {toolCalling?: boolean, imageInput?: boolean, source?: string}>, fetchedAt: number }} */
 let modelCache = { models: [], capabilities: {}, fetchedAt: 0 };
 
-let refreshTimer = null;
 /** @type {vscode.EventEmitter<void> | null} */
 let modelChangeEmitter = null;
 
@@ -83,58 +82,6 @@ async function saveCacheToStorage(context) {
 }
 
 // ─── OpenAI API call (streaming) ───────────────────────────────────────────
-
-async function* callOpenAI(endpoint, apiKey, model, messages, signal) {
-  const config = cfg();
-  const body = {
-    model,
-    messages,
-    stream: true,
-    temperature: config.get("temperature") ?? 0.2,
-    max_tokens: config.get("maxTokens") ?? 8192,
-  };
-
-  const headers = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-
-  const url = endpoint.replace(/\/$/, "") + "/chat/completions";
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`HTTP ${res.status}: ${text}`);
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop();
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed === "data: [DONE]") continue;
-      if (trimmed.startsWith("data: ")) {
-        try {
-          const json = JSON.parse(trimmed.slice(6));
-          const delta = json.choices?.[0]?.delta?.content;
-          if (delta) yield delta;
-        } catch {
-          // skip malformed chunk
-        }
-      }
-    }
-  }
-}
 
 /**
  * OpenAI streaming with tool-call support.
@@ -430,15 +377,6 @@ async function fetchModelsAndCaps(context, { silent = true } = {}) {
   }
 }
 
-function startAutoRefresh(context) {
-  if (refreshTimer) clearInterval(refreshTimer);
-  const intervalMs = Math.max(30000, cfg().get("modelRefreshIntervalMs") || 300000);
-  refreshTimer = setInterval(() => {
-    fetchModelsAndCaps(context).catch(() => {});
-  }, intervalMs);
-  debug(`[refresh] auto-refresh every ${intervalMs}ms`);
-}
-
 async function patchModelCapability(context, modelId, patch) {
   const caps = { ...(modelCache.capabilities || {}) };
   caps[modelId] = { ...(caps[modelId] || {}), ...patch };
@@ -557,94 +495,6 @@ async function cmdTestConnection(context) {
       }
     }
   );
-}
-
-// ─── Chat Panel (WebView) ──────────────────────────────────────────────────
-
-let chatPanel = null;
-
-async function cmdOpenChat(context) {
-  if (chatPanel) {
-    chatPanel.reveal(vscode.ViewColumn.Two);
-    return;
-  }
-
-  chatPanel = vscode.window.createWebviewPanel(
-    "fantasyAIChat",
-    "FantasyAI Chat",
-    vscode.ViewColumn.Two,
-    { enableScripts: true, retainContextWhenHidden: true }
-  );
-
-  chatPanel.onDidDispose(() => {
-    chatPanel = null;
-  });
-
-  chatPanel.webview.html = getChatHtml();
-
-  const pushModels = () => {
-    chatPanel?.webview.postMessage({
-      type: "models",
-      models: modelCache.models,
-      activeModel: cfg().get("activeModel") || "",
-    });
-  };
-  pushModels();
-
-  const subModelChange = modelChangeEmitter?.event(pushModels);
-  if (subModelChange) chatPanel.onDidDispose(() => subModelChange.dispose());
-
-  const abortControllers = new Map();
-
-  chatPanel.webview.onDidReceiveMessage(async (msg) => {
-    if (msg.type === "send") {
-      const { id, model, history } = msg;
-      const apiKey = await getApiKey(context);
-      if (!apiKey) {
-        chatPanel?.webview.postMessage({ type: "error", id, text: "Set your FantasyAI API key first." });
-        return;
-      }
-      const systemPrompt =
-        cfg().get("systemPrompt") || "You are a helpful coding assistant inside VS Code.";
-      const messages = [
-        { role: "system", content: systemPrompt },
-        ...history,
-      ];
-
-      const ac = new AbortController();
-      abortControllers.set(id, ac);
-      chatPanel?.webview.postMessage({ type: "start", id });
-
-      try {
-        for await (const chunk of callOpenAI(
-          FANTASYAI_ENDPOINT,
-          apiKey,
-          model,
-          messages,
-          ac.signal
-        )) {
-          chatPanel?.webview.postMessage({ type: "chunk", id, text: chunk });
-        }
-        chatPanel?.webview.postMessage({ type: "done", id });
-      } catch (e) {
-        if (e.name !== "AbortError") {
-          chatPanel?.webview.postMessage({ type: "error", id, text: e.message });
-        }
-      } finally {
-        abortControllers.delete(id);
-      }
-    }
-
-    if (msg.type === "abort") {
-      abortControllers.get(msg.id)?.abort();
-      abortControllers.delete(msg.id);
-    }
-
-    if (msg.type === "refreshModels") {
-      await fetchModelsAndCaps(context);
-      pushModels();
-    }
-  });
 }
 
 // ─── Language Model Provider (Copilot integration) ─────────────────────────
@@ -1027,251 +877,6 @@ function createStatusBar(context) {
   }
 }
 
-// ─── Chat WebView HTML ─────────────────────────────────────────────────────
-
-function getChatHtml() {
-  return /* html */ `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FantasyAI Chat</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
-    color: var(--vscode-editor-foreground);
-    background: var(--vscode-editor-background);
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    overflow: hidden;
-  }
-  #toolbar {
-    display: flex;
-    gap: 6px;
-    padding: 8px;
-    background: var(--vscode-sideBar-background);
-    border-bottom: 1px solid var(--vscode-panel-border);
-    flex-shrink: 0;
-  }
-  select, button {
-    background: var(--vscode-dropdown-background);
-    color: var(--vscode-dropdown-foreground);
-    border: 1px solid var(--vscode-dropdown-border);
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: inherit;
-    cursor: pointer;
-  }
-  select { flex: 1; }
-  button:hover { opacity: 0.85; }
-  #messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .msg {
-    max-width: 92%;
-    padding: 10px 14px;
-    border-radius: 10px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    line-height: 1.5;
-  }
-  .msg.user {
-    align-self: flex-end;
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-  }
-  .msg.assistant {
-    align-self: flex-start;
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-input-border, transparent);
-  }
-  .msg.error {
-    align-self: flex-start;
-    background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
-    border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
-  }
-  #inputArea {
-    display: flex;
-    gap: 6px;
-    padding: 8px;
-    border-top: 1px solid var(--vscode-panel-border);
-    flex-shrink: 0;
-  }
-  textarea {
-    flex: 1;
-    background: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border, transparent);
-    border-radius: 6px;
-    padding: 8px;
-    font-family: inherit;
-    font-size: inherit;
-    resize: none;
-    min-height: 40px;
-    max-height: 200px;
-  }
-  textarea:focus { outline: 1px solid var(--vscode-focusBorder); }
-  #sendBtn {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-    border: none;
-    padding: 8px 16px;
-    align-self: flex-end;
-  }
-  #stopBtn {
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
-    border: none;
-    padding: 8px 12px;
-    align-self: flex-end;
-    display: none;
-  }
-  .spinner::after {
-    content: " ▌";
-    animation: blink 0.7s step-end infinite;
-  }
-  @keyframes blink { 50% { opacity: 0; } }
-  #empty {
-    color: var(--vscode-descriptionForeground);
-    text-align: center;
-    margin: auto;
-    opacity: 0.6;
-  }
-</style>
-</head>
-<body>
-<div id="toolbar">
-  <select id="modelSelect"><option>No models</option></select>
-  <button id="clearBtn" title="Clear chat">🗑</button>
-  <button id="refreshBtn" title="Refresh models">↺</button>
-</div>
-<div id="messages"><div id="empty">Start a conversation…</div></div>
-<div id="inputArea">
-  <textarea id="input" rows="2" placeholder="Type a message… (Enter to send, Shift+Enter for newline)"></textarea>
-  <button id="sendBtn">Send</button>
-  <button id="stopBtn">Stop</button>
-</div>
-
-<script>
-const vscode = acquireVsCodeApi();
-let models = [];
-let activeModel = "";
-let history = [];
-let currentId = null;
-
-const modelSel = document.getElementById("modelSelect");
-const messages = document.getElementById("messages");
-const input = document.getElementById("input");
-const sendBtn = document.getElementById("sendBtn");
-const stopBtn = document.getElementById("stopBtn");
-const empty = document.getElementById("empty");
-
-document.getElementById("refreshBtn").addEventListener("click", () => {
-  vscode.postMessage({ type: "refreshModels" });
-});
-
-document.getElementById("clearBtn").addEventListener("click", () => {
-  history = [];
-  messages.innerHTML = "";
-  messages.appendChild(empty);
-  empty.style.display = "";
-});
-
-function sendMessage() {
-  const text = input.value.trim();
-  if (!text || currentId) return;
-  const model = modelSel.value;
-  if (!model || model === "No models") {
-    appendMsg("No model selected.", "error"); return;
-  }
-
-  empty.style.display = "none";
-  appendMsg(text, "user");
-  history.push({ role: "user", content: text });
-  input.value = "";
-  input.style.height = "auto";
-
-  currentId = Math.random().toString(36).slice(2);
-  vscode.postMessage({ type: "send", id: currentId, model, history });
-}
-
-sendBtn.addEventListener("click", sendMessage);
-stopBtn.addEventListener("click", () => {
-  if (currentId) {
-    vscode.postMessage({ type: "abort", id: currentId });
-  }
-});
-input.addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-});
-input.addEventListener("input", () => {
-  input.style.height = "auto";
-  input.style.height = Math.min(input.scrollHeight, 200) + "px";
-});
-
-let currentEl = null;
-let currentText = "";
-
-function appendMsg(text, role) {
-  const el = document.createElement("div");
-  el.className = \`msg \${role}\`;
-  el.textContent = text;
-  messages.appendChild(el);
-  messages.scrollTop = messages.scrollHeight;
-  return el;
-}
-
-window.addEventListener("message", ({ data }) => {
-  if (data.type === "models") {
-    models = data.models || [];
-    activeModel = data.activeModel || "";
-    modelSel.innerHTML = models.length
-      ? models.map(m => \`<option value="\${m}" \${m===activeModel?"selected":""}>\${m}</option>\`).join("")
-      : "<option>No models</option>";
-    return;
-  }
-
-  if (data.id !== currentId) return;
-
-  if (data.type === "start") {
-    currentText = "";
-    currentEl = appendMsg("", "assistant spinner");
-    sendBtn.style.display = "none";
-    stopBtn.style.display = "";
-  }
-
-  if (data.type === "chunk") {
-    currentText += data.text;
-    if (currentEl) currentEl.textContent = currentText;
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  if (data.type === "done") {
-    if (currentEl) currentEl.className = "msg assistant";
-    history.push({ role: "assistant", content: currentText });
-    currentEl = null; currentText = ""; currentId = null;
-    sendBtn.style.display = ""; stopBtn.style.display = "none";
-  }
-
-  if (data.type === "error") {
-    if (currentEl) currentEl.remove();
-    appendMsg("Error: " + data.text, "error");
-    currentEl = null; currentText = ""; currentId = null;
-    sendBtn.style.display = ""; stopBtn.style.display = "none";
-  }
-});
-</script>
-</body>
-</html>`;
-}
 
 // ─── Activate / Deactivate ─────────────────────────────────────────────────
 
@@ -1285,7 +890,6 @@ async function activate(context) {
     createStatusBar(context);
 
     context.subscriptions.push(
-      vscode.commands.registerCommand("fantasyAI.openChat", () => cmdOpenChat(context)),
       vscode.commands.registerCommand("fantasyAI.setApiKey", () => cmdSetApiKey(context)),
       vscode.commands.registerCommand("fantasyAI.clearApiKey", () => cmdClearApiKey(context)),
       vscode.commands.registerCommand("fantasyAI.pickModel", () => cmdPickModel(context)),
@@ -1295,9 +899,6 @@ async function activate(context) {
 
     context.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("fantasyAI.modelRefreshIntervalMs")) {
-          startAutoRefresh(context);
-        }
         if (e.affectsConfiguration("fantasyAI.activeModel") ||
             e.affectsConfiguration("fantasyAI.contextWindow") ||
             e.affectsConfiguration("fantasyAI.maxTokens")) {
@@ -1306,7 +907,7 @@ async function activate(context) {
       })
     );
 
-    // Kick off the first auto-refresh (silent — no popup if key is missing)
+    // Refresh models once at startup (silent — no popup if key is missing)
     fetchModelsAndCaps(context).then(() => {
       if (!modelCache.models.length) {
         getApiKey(context).then((key) => {
@@ -1323,24 +924,12 @@ async function activate(context) {
         });
       }
     });
-
-    startAutoRefresh(context);
-
-    context.subscriptions.push({
-      dispose() {
-        if (refreshTimer) clearInterval(refreshTimer);
-        refreshTimer = null;
-      },
-    });
   } catch (e) {
     console.error("[fantasyai] Fatal activation error:", e);
     vscode.window.showErrorMessage(`FantasyAI: activation failed - ${e.message}`);
   }
 }
 
-function deactivate() {
-  if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = null;
-}
+function deactivate() {}
 
 module.exports = { activate, deactivate };

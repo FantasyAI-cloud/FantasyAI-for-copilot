@@ -9,17 +9,34 @@
     "type": "git",
     "url": "https://github.com/fantasyai/fantasyai-copilot.git"
   },
-  "keywords": ["fantasyai", "copilot", "ai", "chat"],
+  "homepage": "https://fantasyai.cloud",
+  "bugs": {
+    "url": "https://github.com/fantasyai/fantasyai-copilot/issues"
+  },
+  "qna": "marketplace",
+  "keywords": [
+    "fantasyai",
+    "copilot",
+    "ai",
+    "chat",
+    "llm",
+    "openai",
+    "language-model",
+    "vscode-copilot"
+  ],
   "engines": { "vscode": "^1.90.0" },
   "categories": ["AI", "Chat", "Other"],
   "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#0b0d12",
+    "theme": "dark"
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "fantasyAI.openChat",       "title": "FantasyAI: Open Chat" },
       { "command": "fantasyAI.setApiKey",      "title": "FantasyAI: Set API Key" },
       { "command": "fantasyAI.clearApiKey",    "title": "FantasyAI: Clear API Key" },
       { "command": "fantasyAI.pickModel",      "title": "FantasyAI: Pick Model" },
@@ -62,12 +79,6 @@
           "default": 120000,
           "minimum": 1000
         },
-        "fantasyAI.modelRefreshIntervalMs": {
-          "type": "number",
-          "default": 300000,
-          "minimum": 30000,
-          "description": "How often (ms) to auto-refresh the model list. Minimum 30s."
-        },
         "fantasyAI.detection.timeoutMs": {
           "type": "number",
           "default": 30000,
@@ -90,7 +101,6 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "fantasyAI.openChat" },
         { "command": "fantasyAI.setApiKey" },
         { "command": "fantasyAI.clearApiKey" },
         { "command": "fantasyAI.pickModel" },
@@ -101,8 +111,10 @@
   },
   "scripts": {
     "lint": "node --check extension.js",
+    "vscode:prepublish": "node --check extension.js",
     "package": "vsce package",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "publish:openvsx": "ovsx publish"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.0.0"
