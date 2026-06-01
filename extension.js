@@ -6,7 +6,7 @@ const os = require("os");
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-const FANTASYAI_ENDPOINT = "http://localhost:3000/api/v1";
+const FANTASYAI_ENDPOINT = "https://fantasyai.cloud/api/v1";
 const FANTASYAI_VENDOR = "fantasyai";
 const SECRET_KEY = "fantasyAI.apiKey";
 const CACHE_KEY = "fantasyAI.modelCache";
@@ -214,30 +214,20 @@ async function callOpenAISimple(endpoint, apiKey, p, options = {}) {
   return res.json();
 }
 
-// ─── Capability detection ──────────────────────────────────────────────────
+// ─── Capability resolution ─────────────────────────────────────────────────
+//
+// Capabilities are owned by the FantasyAI gateway: `/v1/models` always returns
+// a `capabilities` array for every model (see fantasy-ai/app/api/v1/models).
+// The extension never probes — every probe at scale would hammer the upstream
+// providers, and the gateway already learns from real runtime failures via its
+// own `tool-support-cache`.
 
-const TOOL_ERR_RE = /(does\s*not\s*support\s*(tool|function)|tool[_\s]?(call|use)\s*not\s*supported|no\s*tool\s*support|function[_\s]?calling\s*not\s*supported)/i;
-
-function getDetectionTimeout(override) {
-  if (override && override > 0) return override;
-  return cfg().get("detection.timeoutMs") || 30000;
-}
-function getDetectionConcurrency(override) {
-  if (override && override > 0) return override;
-  const configured = cfg().get("detection.concurrency") || 0;
-  if (configured > 0) return configured;
-  return 6;
-}
-
-// Generic /v1/models capability parser — gateways that return a `capabilities`
-// array per model (FantasyAI, OpenWebUI, etc.) get treated as authoritative.
 function parseGatewayCaps(data) {
   const out = {};
   for (const m of (data?.data || data?.models || [])) {
     const id = m?.id;
     if (!id) continue;
-    const caps = m.capabilities;
-    if (!Array.isArray(caps)) continue;
+    const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
     out[id] = {
       toolCalling: caps.includes("tools") || caps.includes("function_calling"),
       imageInput: caps.includes("vision") || caps.includes("image"),
@@ -245,96 +235,6 @@ function parseGatewayCaps(data) {
     };
   }
   return out;
-}
-
-// Probe: send a 1-token request with a dummy tool. If the server rejects with
-// a "no tool support" 400, the model doesn't support tools. Otherwise assume yes.
-async function probeToolSupport(endpoint, apiKey, modelId, signal, timeoutMs = 30000) {
-  const body = {
-    model: modelId,
-    messages: [{ role: "user", content: "ping" }],
-    max_tokens: 1,
-    stream: false,
-    tools: [{
-      type: "function",
-      function: {
-        name: "noop",
-        description: "noop",
-        parameters: { type: "object", properties: {} },
-      },
-    }],
-    tool_choice: "auto",
-  };
-  const headers = { "Content-Type": "application/json" };
-  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  const url = endpoint.replace(/\/$/, "") + "/chat/completions";
-  const ctrl = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
-  signal?.addEventListener("abort", () => ctrl.abort(), { once: true });
-  try {
-    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
-    clearTimeout(timer);
-    if (res.status === 400) {
-      const text = await res.text().catch(() => "");
-      if (TOOL_ERR_RE.test(text)) return { toolCalling: false, imageInput: false, source: "probe" };
-      return { toolCalling: true, imageInput: false, source: "probe" };
-    }
-    if (res.ok) return { toolCalling: true, imageInput: false, source: "probe" };
-    return null;
-  } catch {
-    if (timedOut) return { source: "timeout" };
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const out = new Array(items.length);
-  let idx = 0;
-  async function worker() {
-    while (true) {
-      const i = idx++;
-      if (i >= items.length) return;
-      out[i] = await mapper(items[i], i);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
-  return out;
-}
-
-async function detectCapabilities(endpoint, apiKey, models, onProgress, opts = {}) {
-  const result = {};
-  const total = models.length;
-  let done = 0;
-  const tick = (m) => { done++; try { onProgress?.(done, total, m); } catch {} };
-
-  const timeoutMs = getDetectionTimeout(opts.timeoutMs);
-  const concurrency = getDetectionConcurrency(opts.concurrency);
-  debug(`[caps] detect models=${total} timeout=${timeoutMs}ms concurrency=${concurrency}`);
-
-  // Step 1: try /models for gateway-exposed capabilities
-  let bulkData = opts.bulkData;
-  if (!bulkData) {
-    try { bulkData = await callOpenAISimple(endpoint, apiKey, "/models"); } catch {}
-  }
-  if (bulkData) {
-    const gw = parseGatewayCaps(bulkData);
-    Object.assign(result, gw);
-    for (const m of models) if (result[m]) tick(m);
-  }
-
-  const remaining = models.filter((m) => !result[m]);
-
-  // Step 2: per-model probe fallback
-  await mapWithConcurrency(remaining, concurrency, async (m) => {
-    const caps = await probeToolSupport(endpoint, apiKey, m, undefined, timeoutMs);
-    result[m] = caps || { source: "error" };
-    tick(m);
-  });
-
-  return result;
 }
 
 function resolveCaps(modelId) {
@@ -364,25 +264,17 @@ async function fetchModelsAndCaps(context, { silent = true } = {}) {
       debug("[refresh] /models returned no entries");
       return null;
     }
-    const caps = await detectCapabilities(FANTASYAI_ENDPOINT, apiKey, models, null, { bulkData: data });
+    const caps = parseGatewayCaps(data);
     modelCache = { models, capabilities: caps, fetchedAt: Date.now() };
     await saveCacheToStorage(context);
     modelChangeEmitter?.fire();
-    debug(`[refresh] cached ${models.length} model(s)`);
+    debug(`[refresh] cached ${models.length} model(s) (caps from gateway)`);
     return modelCache;
   } catch (e) {
     debug(`[refresh] failed: ${e.message}`);
     if (!silent) vscode.window.showErrorMessage(`FantasyAI refresh failed: ${e.message}`);
     return null;
   }
-}
-
-async function patchModelCapability(context, modelId, patch) {
-  const caps = { ...(modelCache.capabilities || {}) };
-  caps[modelId] = { ...(caps[modelId] || {}), ...patch };
-  modelCache = { ...modelCache, capabilities: caps };
-  await saveCacheToStorage(context);
-  debug(`[caps] persisted ${modelId} → ${JSON.stringify(patch)}`);
 }
 
 // ─── Commands ──────────────────────────────────────────────────────────────
@@ -784,30 +676,10 @@ function registerLanguageModels(context) {
         }
       };
 
-      try {
-        await runStream(extraBody);
-      } catch (err) {
-        const msg = String(err?.message || "");
-        const hadTools = !!extraBody.tools?.length;
-        if (hadTools && TOOL_ERR_RE.test(msg)) {
-          debug(`[lm] ⚠ tool rejection for ${modelId} → persisting toolCalling=false and retrying without tools`);
-          await patchModelCapability(context, modelId, {
-            toolCalling: false,
-            imageInput: resolved.imageInput,
-            source: "runtime",
-          });
-          modelChangeEmitter.fire();
-          vscode.window.showWarningMessage(
-            `Model "${modelId}" does not support tools — disabled tool calling and retrying.`
-          );
-          const retryBody = { ...extraBody };
-          delete retryBody.tools;
-          delete retryBody.tool_choice;
-          await runStream(retryBody);
-        } else {
-          throw err;
-        }
-      }
+      // No tool-rejection retry here: the FantasyAI gateway already handles
+      // it server-side (lib/tool-support-cache + findSimilarModels fallback)
+      // and refreshing /v1/models will reflect the updated capabilities.
+      await runStream(extraBody);
 
       if (streamReasoning && streamToolCallIds.length > 0) {
         for (const id of streamToolCallIds) {

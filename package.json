@@ -78,18 +78,6 @@
           "type": "number",
           "default": 120000,
           "minimum": 1000
-        },
-        "fantasyAI.detection.timeoutMs": {
-          "type": "number",
-          "default": 30000,
-          "minimum": 1000,
-          "description": "Per-model probe timeout (ms) during capability detection."
-        },
-        "fantasyAI.detection.concurrency": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "description": "Parallel probes during capability detection. 0 = auto."
         }
       }
     },
