@@ -38,7 +38,6 @@ That's it — no endpoint or provider configuration required.
 | `FantasyAI: Pick Model` | Set the active FantasyAI model |
 | `FantasyAI: Refresh Models` | Force a model-list refresh |
 | `FantasyAI: Test Connection` | Verify the API is reachable |
-| `FantasyAI: Open Chat` | Open the built-in chat panel |
 
 ---
 
