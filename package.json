@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fantasyai/fantasyai-copilot.git"
+    "url": "https://github.com/FantasyAI-cloud/FantasyAI-for-copilot.git"
   },
   "homepage": "https://fantasyai.cloud",
   "bugs": {
-    "url": "https://github.com/fantasyai/fantasyai-copilot/issues"
+    "url": "https://github.com/FantasyAI-cloud/FantasyAI-for-copilot/issues"
   },
   "qna": "marketplace",
   "keywords": [
