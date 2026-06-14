@@ -2,7 +2,7 @@
   "name": "fantasyai-copilot",
   "displayName": "FantasyAI for Copilot",
   "description": "Use FantasyAI as a native Copilot Chat language model provider.",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "publisher": "fantasyai",
   "license": "MIT",
   "repository": {
@@ -63,12 +63,6 @@
           "default": 8192,
           "minimum": 1,
           "description": "Maximum output tokens per response."
-        },
-        "fantasyAI.contextWindow": {
-          "type": "number",
-          "default": 128000,
-          "minimum": 1024,
-          "description": "Context window advertised to Copilot."
         },
         "fantasyAI.systemPrompt": {
           "type": "string",
