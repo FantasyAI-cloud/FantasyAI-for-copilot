@@ -630,6 +630,15 @@ function registerLanguageModels(context) {
       const tStreamStart = Date.now();
       let streamReasoning = "";
       const streamToolCallIds = [];
+      // The VS Code language-model PROVIDER API exposes no native "thinking"
+      // response part (LanguageModelResponsePart = text | toolCall | toolResult |
+      // data), so Copilot's foldable bubble — reserved for its first-party models —
+      // can't be produced by a BYOK provider. When enabled, we surface reasoning
+      // as a quoted markdown block streamed ABOVE the answer (closest reliable
+      // rendering), with a divider inserted once the real answer begins.
+      const showReasoning = cfg().get("showReasoning", true);
+      let reasoningHeaderSent = false;
+      let reasoningDividerSent = false;
 
       const runStream = async (body) => {
         for await (const chunk of callOpenAIWithTools(
@@ -641,9 +650,21 @@ function registerLanguageModels(context) {
           body
         )) {
           if (chunk.type === "text") {
+            if (showReasoning && reasoningHeaderSent && !reasoningDividerSent) {
+              progress.report(new vscode.LanguageModelTextPart("\n\n---\n\n"));
+              reasoningDividerSent = true;
+            }
             progress.report(new vscode.LanguageModelTextPart(chunk.text));
           } else if (chunk.type === "reasoning") {
             streamReasoning += chunk.text;
+            if (showReasoning) {
+              if (!reasoningHeaderSent) {
+                progress.report(new vscode.LanguageModelTextPart("> 🧠 **Reasoning**\n>\n> "));
+                reasoningHeaderSent = true;
+              }
+              // Keep multi-line reasoning inside the blockquote.
+              progress.report(new vscode.LanguageModelTextPart(chunk.text.replace(/\n/g, "\n> ")));
+            }
           } else if (chunk.type === "tool_calls") {
             for (const tc of chunk.calls) {
               let parsedInput;

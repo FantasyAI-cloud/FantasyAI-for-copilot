@@ -2,7 +2,7 @@
   "name": "fantasyai-copilot",
   "displayName": "FantasyAI for Copilot",
   "description": "Use FantasyAI as a native Copilot Chat language model provider.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "fantasyai",
   "license": "MIT",
   "repository": {
@@ -72,6 +72,11 @@
           "type": "number",
           "default": 120000,
           "minimum": 1000
+        },
+        "fantasyAI.showReasoning": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the model's reasoning/thinking as a quoted block above the answer. The VS Code language-model provider API has no native foldable 'thinking' part, so reasoning is rendered as markdown text. Turn off to hide it."
         }
       }
     },
