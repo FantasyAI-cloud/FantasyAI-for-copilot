@@ -43,6 +43,7 @@ const MODEL_CATALOG = [
   { id: "mistral-large",     label: "Mistral Large 3",      toolCalling: true,  imageInput: false, maxContextTokens: 131072,  maxOutputTokens: 8192  },
   { id: "qwen3-max",         label: "Qwen 3 Max",           toolCalling: true,  imageInput: false, maxContextTokens: 262144,  maxOutputTokens: 8192  },
   { id: "minimax",           label: "MiniMax M2",           toolCalling: true,  imageInput: false, maxContextTokens: 204800,  maxOutputTokens: 8192  },
+  { id: "glm-5-2",           label: "GLM 5-2",              toolCalling: true,  imageInput: false, maxContextTokens: 131072,  maxOutputTokens: 8192  },
   { id: "deepseek-v4",       label: "DeepSeek V4",          toolCalling: true,  imageInput: true,  maxContextTokens: 131072,  maxOutputTokens: 8192  },
   { id: "deepseek-r1",       label: "DeepSeek R1",          toolCalling: true,  imageInput: false, maxContextTokens: 131072,  maxOutputTokens: 32768 },
   { id: "deepseek-coder",    label: "DeepSeek Coder",       toolCalling: true,  imageInput: false, maxContextTokens: 131072,  maxOutputTokens: 8192  },
@@ -375,6 +376,25 @@ async function cmdTestConnection(context) {
 
 // ─── Language Model Provider (Copilot integration) ─────────────────────────
 
+// VS Code delivers image attachments as LanguageModelDataPart: `.data` is a
+// Uint8Array and `.mimeType` a string like "image/png". Neither `.value`,
+// `.name` nor `.callId` is set, so such a part matches none of the text/tool
+// branches and would be dropped. Convert it to an OpenAI `image_url` content
+// part (base64 data URL). Returns null for non-image / unparseable parts.
+function toImagePart(part) {
+  if (!part || part.data == null) return null;
+  const mime = typeof part.mimeType === "string" ? part.mimeType : "image/png";
+  if (!mime.startsWith("image/")) return null;
+  let buf;
+  try {
+    buf = Buffer.isBuffer(part.data) ? part.data : Buffer.from(part.data);
+  } catch {
+    return null;
+  }
+  if (!buf || buf.length === 0) return null;
+  return { type: "image_url", image_url: { url: `data:${mime};base64,${buf.toString("base64")}` } };
+}
+
 function registerLanguageModels(context) {
   modelChangeEmitter = new vscode.EventEmitter();
   context.subscriptions.push(modelChangeEmitter);
@@ -465,18 +485,31 @@ function registerLanguageModels(context) {
         }
 
         if (!enableTools) {
-          const text = msg.content
-            .map((p) => (p && typeof p.value === "string" ? p.value : ""))
-            .filter(Boolean)
-            .join("\n");
-          openaiMessages.push({
-            role: msg.role === 1 ? "user" : "assistant",
-            content: text || "",
-          });
+          // Collect text AND image parts. VS Code delivers image attachments as
+          // LanguageModelDataPart (.data: Uint8Array + .mimeType) — NOT a string
+          // .value — so a plain `.value` map silently drops them. Forward images
+          // as OpenAI image_url (data URL) content parts.
+          const textPieces = [];
+          const imgPieces = [];
+          for (const p of msg.content) {
+            if (!p) continue;
+            if (typeof p.value === "string") textPieces.push(p.value);
+            else { const ip = toImagePart(p); if (ip) imgPieces.push(ip); }
+          }
+          const role = msg.role === 1 ? "user" : "assistant";
+          if (imgPieces.length > 0) {
+            const arr = [];
+            if (textPieces.length > 0) arr.push({ type: "text", text: textPieces.join("\n") });
+            for (const ip of imgPieces) arr.push(ip);
+            openaiMessages.push({ role, content: arr });
+          } else {
+            openaiMessages.push({ role, content: textPieces.join("\n") || "" });
+          }
           continue;
         }
 
         const textParts = [];
+        const imageParts = [];
         const toolCalls = [];
         const toolResults = [];
 
@@ -510,10 +543,18 @@ function registerLanguageModels(context) {
             debug(`[lm]   ← tool_result id=${part.callId} content_len=${resultContent.length} preview="${resultContent.slice(0, 80)}"`);
           } else if (typeof part.value === "string") {
             textParts.push(part.value);
+          } else {
+            // Image attachment (LanguageModelDataPart) → OpenAI image_url part.
+            const ip = toImagePart(part);
+            if (ip) {
+              imageParts.push(ip);
+              debug(`[lm]   ← image part mime=${part.mimeType || "image/png"}`);
+            }
           }
         }
 
         const hasText = textParts.length > 0;
+        const hasImages = imageParts.length > 0;
         const hasToolCalls = toolCalls.length > 0;
 
         if (hasToolCalls) {
@@ -532,11 +573,19 @@ function registerLanguageModels(context) {
           continue;
         }
 
-        if (hasText) {
-          openaiMessages.push({
-            role: msg.role === 1 ? "user" : "assistant",
-            content: textParts.join("\n"),
-          });
+        if (hasText || hasImages) {
+          const role = msg.role === 1 ? "user" : "assistant";
+          if (hasImages) {
+            // Mixed text+image turn → OpenAI content-parts array. The gateway's
+            // extractProviderMessages lifts image_url parts into .images so the
+            // describe-then-forward vision path can see them.
+            const arr = [];
+            if (hasText) arr.push({ type: "text", text: textParts.join("\n") });
+            for (const ip of imageParts) arr.push(ip);
+            openaiMessages.push({ role, content: arr });
+          } else {
+            openaiMessages.push({ role, content: textParts.join("\n") });
+          }
         }
 
         for (const tr of toolResults) {

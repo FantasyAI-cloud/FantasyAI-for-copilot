@@ -2,7 +2,7 @@
   "name": "fantasyai-copilot",
   "displayName": "FantasyAI for Copilot",
   "description": "Use FantasyAI as a native Copilot Chat language model provider.",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "publisher": "fantasyai",
   "license": "MIT",
   "repository": {
