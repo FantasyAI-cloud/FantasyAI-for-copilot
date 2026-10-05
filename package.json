@@ -2,7 +2,7 @@
   "name": "fantasyai-copilot",
   "displayName": "FantasyAI for Copilot",
   "description": "Use FantasyAI as a native Copilot Chat language model provider.",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "publisher": "fantasyai",
   "license": "MIT",
   "repository": {
@@ -24,7 +24,7 @@
     "language-model",
     "vscode-copilot"
   ],
-  "engines": { "vscode": "^1.90.0" },
+  "engines": { "vscode": "^1.116.0" },
   "categories": ["AI", "Chat", "Other"],
   "icon": "icon.png",
   "galleryBanner": {
@@ -76,7 +76,7 @@
         "fantasyAI.showReasoning": {
           "type": "boolean",
           "default": true,
-          "description": "Show the model's reasoning/thinking as a quoted block above the answer. The VS Code language-model provider API has no native foldable 'thinking' part, so reasoning is rendered as markdown text. Turn off to hide it."
+          "description": "Show the model's reasoning in Copilot's native collapsible thinking block when the VS Code thinking API is available. Turn off to hide it; reasoning is still preserved for tool calls."
         }
       }
     },
@@ -98,6 +98,7 @@
   },
   "scripts": {
     "lint": "node --check extension.js",
+    "test": "node --test test/*.test.js",
     "vscode:prepublish": "node --check extension.js",
     "package": "vsce package",
     "publish": "vsce publish",

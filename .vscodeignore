@@ -8,6 +8,7 @@ node_modules/**
 .gitattributes
 .github/**
 .idea/**
+.kilo/**
 *.swp
 *.swo
 
@@ -26,6 +27,7 @@ test.txt
 
 # Dev-only scripts (kept out of the published bundle)
 install-local.mjs
+test/**
 
 # Lockfile not needed in marketplace bundle
 package-lock.json

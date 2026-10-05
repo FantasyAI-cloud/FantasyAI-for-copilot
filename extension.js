@@ -24,6 +24,12 @@ const SECRET_KEY = "fantasyAI.apiKey";
 // drive the Copilot capability hints and the picker badges; the token figures
 // are advertised to Copilot for context/output budgeting.
 const MODEL_CATALOG = [
+  { id: "gpt-5-6-sol",       label: "GPT 5.6 Sol",          toolCalling: true,  imageInput: true,  maxContextTokens: 131072,   maxOutputTokens: 32768 },
+  { id: "gpt-5-6-terra",     label: "GPT 5.6 Terra",        toolCalling: true,  imageInput: true,  maxContextTokens: 131072,   maxOutputTokens: 32768 },
+  { id: "gpt-5-6-astra",     label: "GPT 5.6 Astra",        toolCalling: true,  imageInput: true,  maxContextTokens: 131072,   maxOutputTokens: 32768 },
+  { id: "claude-opus-5",     label: "Claude Opus 5",        toolCalling: true,  imageInput: true,  maxContextTokens: 1000000,  maxOutputTokens: 32768 },
+  { id: "claude-sonnet-5",   label: "Claude Sonnet 5",      toolCalling: true,  imageInput: true,  maxContextTokens: 1000000,  maxOutputTokens: 128000 },
+  { id: "qwen3.8-flash",     label: "Qwen 3.8 Flash",       toolCalling: true,  imageInput: false, maxContextTokens: 262144,   maxOutputTokens: 32768 },
   { id: "auto",              label: "Auto (smart routing)", toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
   { id: "gemma",             label: "Gemma",                toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
   { id: "gpt-oss",           label: "GPT-OSS",              toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 16384 },
@@ -109,7 +115,7 @@ let modelChangeEmitter = null;
 
 /**
  * OpenAI streaming with tool-call support.
- * Yields { type: "text", text: string } | { type: "tool_calls", calls: array }
+ * Yields text, reasoning, or tool_calls chunks.
  */
 async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, extraBody = {}) {
   const t0 = Date.now();
@@ -183,11 +189,11 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
 
         const deltaText = choice.delta?.content;
         const reasoningText = choice.delta?.reasoning_content;
-        if (deltaText) {
-          yield { type: "text", text: deltaText };
-        }
         if (reasoningText) {
           yield { type: "reasoning", text: reasoningText };
+        }
+        if (deltaText) {
+          yield { type: "text", text: deltaText };
         }
 
         const toolDeltas = choice.delta?.tool_calls;
@@ -373,6 +379,15 @@ async function cmdTestConnection(context) {
 
 // ─── Language Model Provider (Copilot integration) ─────────────────────────
 
+function isThinkingPart(part) {
+  return typeof vscode.LanguageModelThinkingPart === "function" &&
+    part instanceof vscode.LanguageModelThinkingPart;
+}
+
+function thinkingText(part) {
+  return Array.isArray(part.value) ? part.value.join("") : part.value || "";
+}
+
 // VS Code delivers image attachments as LanguageModelDataPart: `.data` is a
 // Uint8Array and `.mimeType` a string like "image/png". Neither `.value`,
 // `.name` nor `.callId` is set, so such a part matches none of the text/tool
@@ -490,6 +505,7 @@ function registerLanguageModels(context) {
           const imgPieces = [];
           for (const p of msg.content) {
             if (!p) continue;
+            if (isThinkingPart(p)) continue;
             if (typeof p.value === "string") textPieces.push(p.value);
             else { const ip = toImagePart(p); if (ip) imgPieces.push(ip); }
           }
@@ -509,11 +525,14 @@ function registerLanguageModels(context) {
         const imageParts = [];
         const toolCalls = [];
         const toolResults = [];
+        let historyReasoning = "";
 
         for (const part of msg.content) {
           if (!part) continue;
 
-          if (typeof part.name === "string" && part.input !== undefined) {
+          if (isThinkingPart(part)) {
+            historyReasoning += thinkingText(part);
+          } else if (typeof part.name === "string" && part.input !== undefined) {
             toolCalls.push({
               id: part.callId || "",
               type: "function",
@@ -555,10 +574,12 @@ function registerLanguageModels(context) {
         const hasToolCalls = toolCalls.length > 0;
 
         if (hasToolCalls) {
-          let rc = "";
-          for (const tc of toolCalls) {
-            const c = reasoningCache.get("tool:" + tc.id) ?? reasoningCache.get(tc.id);
-            if (c) { rc = c.text; break; }
+          let rc = historyReasoning;
+          if (!rc) {
+            for (const tc of toolCalls) {
+              const c = reasoningCache.get("tool:" + tc.id) ?? reasoningCache.get(tc.id);
+              if (c) { rc = c.text; break; }
+            }
           }
           const entry = {
             role: "assistant",
@@ -581,7 +602,9 @@ function registerLanguageModels(context) {
             for (const ip of imageParts) arr.push(ip);
             openaiMessages.push({ role, content: arr });
           } else {
-            openaiMessages.push({ role, content: textParts.join("\n") });
+            const entry = { role, content: textParts.join("\n") };
+            if (role === "assistant" && historyReasoning) entry.reasoning_content = historyReasoning;
+            openaiMessages.push(entry);
           }
         }
 
@@ -676,15 +699,14 @@ function registerLanguageModels(context) {
       const tStreamStart = Date.now();
       let streamReasoning = "";
       const streamToolCallIds = [];
-      // The VS Code language-model PROVIDER API exposes no native "thinking"
-      // response part (LanguageModelResponsePart = text | toolCall | toolResult |
-      // data), so Copilot's foldable bubble — reserved for its first-party models —
-      // can't be produced by a BYOK provider. When enabled, we surface reasoning
-      // as a quoted markdown block streamed ABOVE the answer (closest reliable
-      // rendering), with a divider inserted once the real answer begins.
+      // Use the native thinking part, as in Vizards/deepseek-v4-for-copilot.
+      // This API is still proposed: guard it for hosts that do not expose it.
+      // Reasoning remains cached for tool continuations even when hidden.
       const showReasoning = cfg().get("showReasoning", true);
-      let reasoningHeaderSent = false;
-      let reasoningDividerSent = false;
+      const nativeThinking = typeof vscode.LanguageModelThinkingPart === "function";
+      if (showReasoning && !nativeThinking) {
+        debug("[lm] Native thinking API unavailable; reasoning display disabled. Update VS Code to enable it.");
+      }
 
       const runStream = async (body) => {
         for await (const chunk of callOpenAIWithTools(
@@ -696,20 +718,11 @@ function registerLanguageModels(context) {
           body
         )) {
           if (chunk.type === "text") {
-            if (showReasoning && reasoningHeaderSent && !reasoningDividerSent) {
-              progress.report(new vscode.LanguageModelTextPart("\n\n---\n\n"));
-              reasoningDividerSent = true;
-            }
             progress.report(new vscode.LanguageModelTextPart(chunk.text));
           } else if (chunk.type === "reasoning") {
             streamReasoning += chunk.text;
-            if (showReasoning) {
-              if (!reasoningHeaderSent) {
-                progress.report(new vscode.LanguageModelTextPart("> 🧠 **Reasoning**\n>\n> "));
-                reasoningHeaderSent = true;
-              }
-              // Keep multi-line reasoning inside the blockquote.
-              progress.report(new vscode.LanguageModelTextPart(chunk.text.replace(/\n/g, "\n> ")));
+            if (showReasoning && nativeThinking) {
+              progress.report(new vscode.LanguageModelThinkingPart(chunk.text));
             }
           } else if (chunk.type === "tool_calls") {
             for (const tc of chunk.calls) {

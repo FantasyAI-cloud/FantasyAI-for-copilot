@@ -4,6 +4,16 @@ All notable changes to **FantasyAI for Copilot** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-10-05
+
+### Added
+- GPT 5.6 Sol, Terra and Astra, Claude Opus 5, Claude Sonnet 5, and Qwen 3.8 Flash from the FantasyAI catalog.
+
+### Changed
+- Stream reasoning through `LanguageModelThinkingPart` for Copilot's native collapsible thinking UI.
+- Preserve native thinking history as `reasoning_content`, including tool continuations.
+- Require VS Code 1.116 or later. Hosts without the thinking API hide reasoning while preserving answers and tool calls.
+
 ## [1.0.0] — 2026-05-27
 
 ### Added
