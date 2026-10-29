@@ -10,55 +10,88 @@ const FANTASYAI_ENDPOINT = "https://fantasyai.cloud/api/v1";
 const FANTASYAI_VENDOR = "fantasyai";
 const SECRET_KEY = "fantasyAI.apiKey";
 
-// ─── Model catalog (hardcoded) ───────────────────────────────────────────────
-//
-// The models the extension advertises to Copilot are hardcoded here, mirroring
-// the FantasyAI web app's source of truth (fantasy-ai/lib/model-catalog.ts →
-// MODEL_CATALOG). We deliberately no longer fetch /models from the gateway to
-// build this list: the catalog is stable, so a static list paints the picker
-// instantly and never depends on a reachable gateway. Image- and video-
-// generation families are excluded — they can't serve as a Copilot chat model.
-//
-// `id` is sent verbatim as the request `model` (the gateway resolves it via
-// resolveCatalogModel); `label` is the display name; `toolCalling`/`imageInput`
-// drive the Copilot capability hints and the picker badges; the token figures
-// are advertised to Copilot for context/output budgeting.
-const MODEL_CATALOG = [
-  { id: "gpt-5-6-sol",       label: "GPT 5.6 Sol",          toolCalling: true,  imageInput: true,  maxContextTokens: 131072,   maxOutputTokens: 32768 },
-  { id: "gpt-5-6-terra",     label: "GPT 5.6 Terra",        toolCalling: true,  imageInput: true,  maxContextTokens: 131072,   maxOutputTokens: 32768 },
-  { id: "gpt-5-6-astra",     label: "GPT 5.6 Astra",        toolCalling: true,  imageInput: true,  maxContextTokens: 131072,   maxOutputTokens: 32768 },
-  { id: "claude-opus-5",     label: "Claude Opus 5",        toolCalling: true,  imageInput: true,  maxContextTokens: 1000000,  maxOutputTokens: 32768 },
-  { id: "claude-sonnet-5",   label: "Claude Sonnet 5",      toolCalling: true,  imageInput: true,  maxContextTokens: 1000000,  maxOutputTokens: 128000 },
-  { id: "qwen3.8-flash",     label: "Qwen 3.8 Flash",       toolCalling: true,  imageInput: false, maxContextTokens: 262144,   maxOutputTokens: 32768 },
-  { id: "auto",              label: "Auto (smart routing)", toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "gemma",             label: "Gemma",                toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "gpt-oss",           label: "GPT-OSS",              toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 16384 },
-  { id: "chatgpt",           label: "GPT-5.5",              toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 16384 },
-  { id: "grok",              label: "Grok 4.1",             toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "grok-4",            label: "Grok 4",               toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "grok-3",            label: "Grok 3",               toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "grok-2",            label: "Grok 2",               toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "gemini",            label: "Gemini 3 Pro",         toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "gemini-3-flash",    label: "Gemini 3 Flash",       toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "gemini-2-5-pro",    label: "Gemini 2.5 Pro",       toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "gemini-2-5-flash",  label: "Gemini 2.5 Flash",     toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "gemini-2-0-flash",  label: "Gemini 2.0 Flash",     toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "gemini-1-5-pro",    label: "Gemini 1.5 Pro",       toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "gemini-1-5-flash",  label: "Gemini 1.5 Flash",     toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "llama-4",           label: "Llama 4",              toolCalling: true,  imageInput: true,  maxContextTokens: 1048576, maxOutputTokens: 8192  },
-  { id: "mistral-large",     label: "Mistral Large 3",      toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "qwen3-max",         label: "Qwen 3 Max",           toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "qwen3-8",           label: "Qwen 3.8",             toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "minimax-m2",        label: "MiniMax M2",           toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "minimax-m3",        label: "MiniMax M3",           toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "glm-5-2",           label: "GLM 5-2",              toolCalling: true,  imageInput: false, maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "deepseek-v4",       label: "DeepSeek V4",          toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "claude-opus-4-8",   label: "Claude Opus 4.8",      toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "claude-opus-4-7",   label: "Claude Opus 4.7",      toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "claude-opus-4-6",   label: "Claude Opus 4.6",      toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6",    toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-  { id: "claude-haiku-4-5",  label: "Claude Haiku 4.5",     toolCalling: true,  imageInput: true,  maxContextTokens: 1048576,  maxOutputTokens: 8192  },
-];
+// ─── API model catalog ─────────────────────────────────────────────────────
+
+const MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
+let modelCatalog = [];
+let modelsLoadedAt = null;
+let modelCatalogRevision = 0;
+let modelCatalogRequest = null;
+
+function resetModelCatalog() {
+  modelCatalog = [];
+  modelsLoadedAt = null;
+  modelCatalogRevision++;
+  modelCatalogRequest = null;
+  modelChangeEmitter?.fire();
+}
+
+function positiveTokenLimit(...values) {
+  return values.find(value => Number.isSafeInteger(value) && value > 0);
+}
+
+function parseModelCatalog(payload) {
+  if (!Array.isArray(payload?.data)) {
+    throw new Error("Invalid /models response: expected a data array.");
+  }
+  const models = new Map();
+  for (const model of payload.data) {
+    if (!model || typeof model.id !== "string" || !model.id.trim()) {
+      throw new Error("Invalid /models response: model ID is missing.");
+    }
+    const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+    if (["image", "video"].includes(model.family) ||
+        capabilities.some(cap => ["image-generation", "video-generation"].includes(cap))) continue;
+    if (models.has(model.id)) continue;
+    models.set(model.id, {
+      id: model.id,
+      label: model.display_name || model.id,
+      toolCalling: capabilities.includes("tools"),
+      imageInput: capabilities.includes("vision"),
+      maxContextTokens: positiveTokenLimit(model.max_input_tokens, model.context_window, 32768),
+      maxOutputTokens: positiveTokenLimit(model.max_output_tokens, model.max_tokens, 8192),
+    });
+  }
+  return [...models.values()];
+}
+
+// Cache successful results in memory; a failed refresh keeps the last API list.
+// Shared requests avoid duplicate fetches when Copilot and commands load together.
+async function loadModels(context, { force = false, silent = true } = {}) {
+  const revision = modelCatalogRevision;
+  const apiKey = await getApiKey(context);
+  if (revision !== modelCatalogRevision) return false;
+  if (!force && modelsLoadedAt !== null && Date.now() - modelsLoadedAt < MODEL_CACHE_TTL_MS) return true;
+
+  if (!modelCatalogRequest) {
+    const request = {};
+    request.promise = (async () => {
+      try {
+        const payload = await callOpenAISimple(FANTASYAI_ENDPOINT, apiKey, "/models", {
+          signal: AbortSignal.timeout(cfg().get("requestTimeoutMs") ?? 120000),
+        });
+        const models = parseModelCatalog(payload);
+        // A response for a previous API key must never replace the current list.
+        if (revision !== modelCatalogRevision) return false;
+        modelCatalog = models;
+        modelsLoadedAt = Date.now();
+        debug(`[models] loaded ${models.length} chat model(s)`);
+        modelChangeEmitter?.fire();
+        return true;
+      } finally {
+        if (modelCatalogRequest === request) modelCatalogRequest = null;
+      }
+    })();
+    modelCatalogRequest = request;
+  }
+  try {
+    return await modelCatalogRequest.promise;
+  } catch (e) {
+    debug(`[models] failed: ${e.message}`);
+    if (!silent) vscode.window.showErrorMessage(`FantasyAI: couldn't load models: ${e.message}`);
+    return false;
+  }
+}
 
 // ─── Debug logger ──────────────────────────────────────────────────────────
 
@@ -100,10 +133,12 @@ async function getApiKey(context) {
 
 async function setApiKeySecret(context, key) {
   await context.secrets.store(SECRET_KEY, key);
+  resetModelCatalog();
 }
 
 async function deleteApiKeySecret(context) {
   await context.secrets.delete(SECRET_KEY);
+  resetModelCatalog();
 }
 
 // ─── Model change signal ─────────────────────────────────────────────────────
@@ -120,7 +155,8 @@ let modelChangeEmitter = null;
 async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, extraBody = {}) {
   const t0 = Date.now();
   const config = cfg();
-  const maxTokens = Math.min(config.get("maxTokens") ?? 8192, 32768);
+  const modelLimit = modelCatalog.find(m => m.id === model)?.maxOutputTokens ?? 8192;
+  const maxTokens = Math.min(config.get("maxTokens") ?? 8192, modelLimit);
   const body = {
     model,
     messages,
@@ -136,9 +172,15 @@ async function* callOpenAIWithTools(endpoint, apiKey, model, messages, signal, e
 
   const headers = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  // Copilot owns all of these turns, including title/summary requests without
+  // tools. Keep its requested reasoning budget consistent on both transports.
+  headers["x-fantasy-agent"] = "1";
+  const requestedEffort = config.get("reasoningEffort") ?? "none";
+  headers["x-fantasy-reasoning-effort"] = ["none", "low", "medium", "high", "max"].includes(requestedEffort)
+    ? requestedEffort : "none";
 
   const url = endpoint.replace(/\/$/, "") + "/chat/completions";
-  debug(`→ POST model=${model} msgs=${messages.length} tools=${body.tools?.length || 0} max_tokens=${body.max_tokens}`);
+  debug(`→ POST model=${model} msgs=${messages.length} tools=${body.tools?.length || 0} max_tokens=${body.max_tokens} reasoning=${headers["x-fantasy-reasoning-effort"]}`);
 
   const res = await fetch(url, {
     method: "POST",
@@ -245,42 +287,14 @@ async function callOpenAISimple(endpoint, apiKey, p, options = {}) {
 }
 
 // ─── Capability resolution ─────────────────────────────────────────────────
-//
-// Capabilities come straight from the hardcoded MODEL_CATALOG above — the
-// single source of truth for what the extension exposes. Unknown ids (Copilot
-// should only ever request ids we advertised) default to tool-capable / no
-// vision so a request is never wrongly stripped of its tools.
 
 function resolveCaps(modelId) {
-  const c = MODEL_CATALOG.find((m) => m.id === modelId);
+  const c = modelCatalog.find((m) => m.id === modelId);
   return {
     toolCalling: c?.toolCalling ?? true,
     imageInput: c?.imageInput ?? false,
-    source: c ? "catalog" : "default",
+    source: c ? "api" : "default",
   };
-}
-
-// ─── Connection check ────────────────────────────────────────────────────────
-//
-// The model list is static, so there's nothing to "fetch" — but we still ping
-// /models to confirm the API key is valid and the gateway is reachable. Returns
-// true on success.
-async function checkConnection(context, { silent = true } = {}) {
-  const apiKey = await getApiKey(context);
-  if (!apiKey) {
-    debug("[conn] no API key — skipping");
-    if (!silent) vscode.window.showWarningMessage("FantasyAI: set your API key first.");
-    return false;
-  }
-  try {
-    await callOpenAISimple(FANTASYAI_ENDPOINT, apiKey, "/models");
-    debug("[conn] gateway reachable");
-    return true;
-  } catch (e) {
-    debug(`[conn] failed: ${e.message}`);
-    if (!silent) vscode.window.showErrorMessage(`FantasyAI connection failed: ${e.message}`);
-    return false;
-  }
 }
 
 // ─── Commands ──────────────────────────────────────────────────────────────
@@ -298,32 +312,37 @@ async function cmdSetApiKey(context) {
   const trimmed = key.trim();
   if (!trimmed) {
     await deleteApiKeySecret(context);
-    modelChangeEmitter?.fire();
+    await loadModels(context);
     vscode.window.showInformationMessage("FantasyAI API key cleared.");
     return;
   }
   await setApiKeySecret(context, trimmed);
-  modelChangeEmitter?.fire();
-  // The model list is static — just validate the key against the gateway.
+  // Reload the catalog for the saved key and its subscription plan.
   const ok = await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: "FantasyAI: verifying API key…" },
-    () => checkConnection(context, { silent: false })
+    { location: vscode.ProgressLocation.Notification, title: "FantasyAI: loading models…" },
+    () => loadModels(context, { force: true, silent: false })
   );
   if (ok) {
-    vscode.window.showInformationMessage(`✅ FantasyAI ready — ${MODEL_CATALOG.length} model(s) available.`);
+    vscode.window.showInformationMessage(`✅ FantasyAI ready — ${modelCatalog.length} model(s) available.`);
   } else {
-    vscode.window.showWarningMessage("API key saved, but the gateway wasn't reachable. Try Test Connection.");
+    vscode.window.showWarningMessage("API key saved, but models could not be loaded. Try Refresh Models.");
   }
 }
 
 async function cmdClearApiKey(context) {
   await deleteApiKeySecret(context);
-  modelChangeEmitter?.fire();
+  await loadModels(context);
   vscode.window.showInformationMessage("FantasyAI API key cleared.");
 }
 
-async function cmdPickModel(_context) {
-  const items = MODEL_CATALOG.map((m) => {
+async function cmdPickModel(context) {
+  const loaded = await loadModels(context, { silent: false });
+  if (!loaded && modelCatalog.length === 0) return;
+  if (modelCatalog.length === 0) {
+    vscode.window.showInformationMessage("FantasyAI: no chat models are currently available.");
+    return;
+  }
+  const items = modelCatalog.map((m) => {
     const badges = [];
     if (m.toolCalling) badges.push("🔧 tools");
     if (m.imageInput) badges.push("🖼 vision");
@@ -346,15 +365,12 @@ async function cmdPickModel(_context) {
 }
 
 async function cmdRefreshModels(context) {
-  // Nothing to fetch — the catalog is hardcoded. Re-fire the change signal so
-  // Copilot re-reads the provider list, and re-validate the gateway connection.
-  modelChangeEmitter?.fire();
   const ok = await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "FantasyAI: refreshing…" },
-    () => checkConnection(context, { silent: false })
+    () => loadModels(context, { force: true, silent: false })
   );
   if (ok) {
-    vscode.window.showInformationMessage(`✅ ${MODEL_CATALOG.length} FantasyAI model(s) available.`);
+    vscode.window.showInformationMessage(`✅ ${modelCatalog.length} FantasyAI model(s) available.`);
   }
 }
 
@@ -427,10 +443,10 @@ function registerLanguageModels(context) {
 
   function buildModelList() {
     // Advertised output cap honours the user's global `maxTokens` setting but is
-    // never larger than the model's own catalog limit (mirrors what /v1/models
-    // reports). Context window comes straight from the catalog per model.
+    // never larger than the limit returned by /models. Context windows and
+    // capabilities also come from the API.
     const userMaxOutput = cfg().get("maxTokens") ?? 8192;
-    return MODEL_CATALOG.map((m) => {
+    return modelCatalog.map((m) => {
       const badge = m.toolCalling ? " 🔧" : "";
       return {
         id: m.id,
@@ -452,6 +468,7 @@ function registerLanguageModels(context) {
     onDidChangeLanguageModelChatInformation: modelChangeEmitter.event,
 
     async provideLanguageModelChatInformation(_options, _token) {
+      await loadModels(context);
       return buildModelList();
     },
 
@@ -471,15 +488,11 @@ function registerLanguageModels(context) {
       const systemPrompt =
         cfg().get("systemPrompt") || "You are a helpful coding assistant inside VS Code.";
 
-      const toolSystemPrompt = enableTools
-        ? `\n\nYou have access to tools for file editing, terminal commands, code search, and web browsing. CRITICAL RULES:
-1. ALWAYS provide ALL required parameters. Study each tool's schema carefully. Never call a tool with empty input {} or missing required fields.
-2. The most important tool is "manage_todo_list" — it REQUIRES a "todoList" array with objects having "id", "title", and "status" fields. Example: {"todoList":[{"id":1,"title":"Task name","status":"in-progress"}]}
-3. If a tool returns an error, read the error message, UNDERSTAND what went wrong, and FIX your input on the next attempt. Never retry with identical input.
-4. If a tool returns a short status (e.g. "No browser pages open"), the tool completed successfully. Move on.
-5. After 2 failed attempts with any tool, GIVE UP and provide your best answer in plain text.
-6. When done, output a clear FINAL ANSWER in plain text — do NOT keep calling tools forever.
-7. Before calling ANY tool, double-check: are ALL required parameters present and valid? If unsure, ask the user instead of guessing.`
+      const toolSystemPrompt = enableTools && options.tools?.length
+        ? `\n\nUse only the tools defined in this request, with their exact names and required parameters.
+When asked to create or modify project files, use the workspace tools to perform the changes.
+Read tool results before deciding the next action. If a tool fails, correct the cause rather than repeating an identical call.
+Only claim a file was created or changed after the relevant tool succeeds. Summarize completed work when the task is finished.`
         : "";
 
       const tMapStart = Date.now();
@@ -793,8 +806,6 @@ function createStatusBar(context) {
 
   const update = () => {
     const active = cfg().get("activeModel");
-    // The catalog is always available, so without an explicit pick we prompt
-    // the user to choose one rather than showing a bare brand label.
     bar.text = active ? `$(hubot) ${active}` : `$(hubot) Pick model`;
     bar.show();
   };
@@ -838,21 +849,19 @@ async function activate(context) {
       })
     );
 
-    // The model list is hardcoded, so there's nothing to load at startup. We
-    // only nudge the user to set an API key (without one the models are listed
-    // but can't actually be called).
-    getApiKey(context).then((key) => {
-      if (!key) {
-        vscode.window.showInformationMessage(
-          "FantasyAI: set your API key to use the models.",
-          "Set API Key"
-        ).then((choice) => {
-          if (choice === "Set API Key") {
-            vscode.commands.executeCommand("fantasyAI.setApiKey");
-          }
-        });
-      }
-    });
+    const key = await getApiKey(context);
+    if (!key) {
+      vscode.window.showInformationMessage(
+        "FantasyAI: set your API key to use the models.",
+        "Set API Key"
+      ).then((choice) => {
+        if (choice === "Set API Key") {
+          vscode.commands.executeCommand("fantasyAI.setApiKey");
+        }
+      });
+    }
+    // Load the plan-aware API catalog, including the public list without a key.
+    await loadModels(context);
   } catch (e) {
     console.error("[fantasyai] Fatal activation error:", e);
     vscode.window.showErrorMessage(`FantasyAI: activation failed - ${e.message}`);

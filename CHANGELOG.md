@@ -4,6 +4,33 @@ All notable changes to **FantasyAI for Copilot** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.1.3] — 2026-10-28
+
+### Fixed
+- Send an explicit reasoning budget for Copilot requests, including titles and summaries, so simple utility turns do not inherit a long server-side reasoning setting.
+
+### Added
+- `fantasyAI.reasoningEffort`, defaulting to `none`, to control generation separately from reasoning display.
+
+## [1.1.2] — 2026-10-27
+
+### Fixed
+- Mark Copilot tool requests and continuations as native agent turns so the FantasyAI gateway does not synthesize unrelated file reads.
+- Describe only the supplied tools instead of requiring a hardcoded task-list tool.
+
+### Changed
+- Keep the local API endpoint used for integration testing.
+
+## [1.1.1]
+
+### Changed
+- Retrieve chat models, display names, capabilities, and token limits from the FantasyAI `/models` API instead of a bundled catalog.
+- Cache model discovery for five minutes, reload on API key changes, and fetch immediately with **Refresh Models**.
+- Preserve the last successful model list on refresh errors and exclude image/video generation models from Copilot Chat.
+- Honor the model's API output limit when streaming responses.
+
 ## [1.1.0] — 2026-10-05
 
 ### Added

@@ -2,7 +2,7 @@
   "name": "fantasyai-copilot",
   "displayName": "FantasyAI for Copilot",
   "description": "Use FantasyAI as a native Copilot Chat language model provider.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "fantasyai",
   "license": "MIT",
   "repository": {
@@ -77,6 +77,12 @@
           "type": "boolean",
           "default": true,
           "description": "Show the model's reasoning in Copilot's native collapsible thinking block when the VS Code thinking API is available. Turn off to hide it; reasoning is still preserved for tool calls."
+        },
+        "fantasyAI.reasoningEffort": {
+          "type": "string",
+          "enum": ["none", "low", "medium", "high", "max"],
+          "default": "none",
+          "description": "Reasoning budget requested from FantasyAI. None favors lower latency; higher levels allow more reasoning for complex tasks. This controls generation independently of Show Reasoning."
         }
       }
     },
